@@ -14,7 +14,7 @@
 #include <linux/moduleparam.h>
 #include <linux/workqueue.h>
 #include <linux/time.h>
-#include <asm/mutex.h>
+#include <linux/mutex.h>
 
 #include "oprof.h"
 #include "event_buffer.h"
@@ -225,56 +225,59 @@ post_sync:
 	mutex_unlock(&start_mutex);
 }
 
-int oprofile_set_backtrace(unsigned long val)
+int oprofile_set_ulong(unsigned long *addr, unsigned long val)
 {
-	int err = 0;
+	int err = -EBUSY;
 
 	mutex_lock(&start_mutex);
-
-	if (oprofile_started) {
-		err = -EBUSY;
-		goto out;
+	if (!oprofile_started) {
+		*addr = val;
+		err = 0;
 	}
-
-	if (!oprofile_ops.backtrace) {
-		err = -EINVAL;
-		goto out;
-	}
-
-	oprofile_backtrace_depth = val;
-
-out:
 	mutex_unlock(&start_mutex);
+
 	return err;
 }
+
+static int timer_mode;
 
 static int __init oprofile_init(void)
 {
 	int err;
 
+	/* always init architecture to setup backtrace support */
 	err = oprofile_arch_init(&oprofile_ops);
-	if (err < 0 || timer) {
-		printk(KERN_INFO "oprofile: using timer interrupt.\n");
+
+	timer_mode = err || timer;	/* fall back to timer mode on errors */
+	if (timer_mode) {
+		if (!err)
+			oprofile_arch_exit();
 		err = oprofile_timer_init(&oprofile_ops);
 		if (err)
-			goto out_arch;
+			return err;
 	}
-	err = oprofilefs_register();
-	if (err)
-		goto out_arch;
-	return 0;
 
-out_arch:
-	oprofile_arch_exit();
+	err = oprofilefs_register();
+	if (!err)
+		return 0;
+
+	/* failed */
+	if (timer_mode)
+		oprofile_timer_exit();
+	else
+		oprofile_arch_exit();
+
 	return err;
 }
 
 
 static void __exit oprofile_exit(void)
 {
-	oprofile_timer_exit();
 	oprofilefs_unregister();
-	oprofile_arch_exit();
+	if (timer_mode)
+		oprofile_timer_exit();
+	else
+		oprofile_arch_exit();
 }
 
 

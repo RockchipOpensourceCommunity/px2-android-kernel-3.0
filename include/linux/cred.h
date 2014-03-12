@@ -1,4 +1,4 @@
-/* Credentials management - see Documentation/credentials.txt
+/* Credentials management - see Documentation/security/credentials.txt
  *
  * Copyright (C) 2008 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
@@ -84,7 +84,7 @@ struct thread_group_cred {
 	atomic_t	usage;
 	pid_t		tgid;			/* thread group process ID */
 	spinlock_t	lock;
-	struct key	*session_keyring;	/* keyring inherited over fork */
+	struct key __rcu *session_keyring;	/* keyring inherited over fork */
 	struct key	*process_keyring;	/* keyring private to this process */
 	struct rcu_head	rcu;			/* RCU deletion hook */
 };
@@ -146,6 +146,7 @@ struct cred {
 	void		*security;	/* subjective LSM security */
 #endif
 	struct user_struct *user;	/* real user ID subscription */
+	struct user_namespace *user_ns; /* cached user->user_ns */
 	struct group_info *group_info;	/* supplementary groups for euid/fsgid */
 	struct rcu_head	rcu;		/* RCU deletion hook */
 };
@@ -153,6 +154,7 @@ struct cred {
 extern void __put_cred(struct cred *);
 extern void exit_creds(struct task_struct *);
 extern int copy_creds(struct task_struct *, unsigned long);
+extern const struct cred *get_task_cred(struct task_struct *);
 extern struct cred *cred_alloc_blank(void);
 extern struct cred *prepare_creds(void);
 extern struct cred *prepare_exec_creds(void);
@@ -273,33 +275,18 @@ static inline void put_cred(const struct cred *_cred)
  * @task: The task to query
  *
  * Access the objective credentials of a task.  The caller must hold the RCU
- * readlock.
+ * readlock or the task must be dead and unable to change its own credentials.
  *
- * The caller must make sure task doesn't go away, either by holding a ref on
- * task or by holding tasklist_lock to prevent it from being unlinked.
+ * The result of this function should not be passed directly to get_cred();
+ * rather get_task_cred() should be used instead.
  */
-#define __task_cred(task) \
-	((const struct cred *)(rcu_dereference_check((task)->real_cred, rcu_read_lock_held() || lockdep_tasklist_lock_is_held())))
-
-/**
- * get_task_cred - Get another task's objective credentials
- * @task: The task to query
- *
- * Get the objective credentials of a task, pinning them so that they can't go
- * away.  Accessing a task's credentials directly is not permitted.
- *
- * The caller must make sure task doesn't go away, either by holding a ref on
- * task or by holding tasklist_lock to prevent it from being unlinked.
- */
-#define get_task_cred(task)				\
-({							\
-	struct cred *__cred;				\
-	rcu_read_lock();				\
-	__cred = (struct cred *) __task_cred((task));	\
-	get_cred(__cred);				\
-	rcu_read_unlock();				\
-	__cred;						\
-})
+#define __task_cred(task)						\
+	({								\
+		const struct task_struct *__t = (task);			\
+		rcu_dereference_check(__t->real_cred,			\
+				      rcu_read_lock_held() ||		\
+				      task_is_dead(__t));		\
+	})
 
 /**
  * get_current_cred - Get the current task's subjective credentials
@@ -368,8 +355,15 @@ static inline void put_cred(const struct cred *_cred)
 #define current_fsgid() 	(current_cred_xxx(fsgid))
 #define current_cap()		(current_cred_xxx(cap_effective))
 #define current_user()		(current_cred_xxx(user))
-#define current_user_ns()	(current_cred_xxx(user)->user_ns)
 #define current_security()	(current_cred_xxx(security))
+
+#ifdef CONFIG_USER_NS
+#define current_user_ns() (current_cred_xxx(user_ns))
+#else
+extern struct user_namespace init_user_ns;
+#define current_user_ns() (&init_user_ns)
+#endif
+
 
 #define current_uid_gid(_uid, _gid)		\
 do {						\

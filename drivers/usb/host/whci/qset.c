@@ -124,7 +124,7 @@ void qset_clear(struct whc *whc, struct whc_qset *qset)
 {
 	qset->td_start = qset->td_end = qset->ntds = 0;
 
-	qset->qh.link = cpu_to_le32(QH_LINK_NTDS(8) | QH_LINK_T);
+	qset->qh.link = cpu_to_le64(QH_LINK_NTDS(8) | QH_LINK_T);
 	qset->qh.status = qset->qh.status & QH_STATUS_SEQ_MASK;
 	qset->qh.err_count = 0;
 	qset->qh.scratch[0] = 0;
@@ -443,7 +443,7 @@ static int qset_add_urb_sg(struct whc *whc, struct whc_qset *qset, struct urb *u
 
 	remaining = urb->transfer_buffer_length;
 
-	for_each_sg(urb->sg, sg, urb->num_sgs, i) {
+	for_each_sg(urb->sg, sg, urb->num_mapped_sgs, i) {
 		dma_addr_t dma_addr;
 		size_t dma_remaining;
 		dma_addr_t sp, ep;
@@ -475,7 +475,7 @@ static int qset_add_urb_sg(struct whc *whc, struct whc_qset *qset, struct urb *u
 			    || (prev_end & (WHCI_PAGE_SIZE-1))
 			    || (dma_addr & (WHCI_PAGE_SIZE-1))
 			    || std->len + WHCI_PAGE_SIZE > QTD_MAX_XFER_SIZE) {
-				if (std->len % qset->max_packet != 0)
+				if (std && std->len % qset->max_packet != 0)
 					return -EINVAL;
 				std = qset_new_std(whc, qset, urb, mem_flags);
 				if (std == NULL) {
@@ -561,7 +561,7 @@ static int qset_add_urb_sg_linearize(struct whc *whc, struct whc_qset *qset,
 
 	remaining = urb->transfer_buffer_length;
 
-	for_each_sg(urb->sg, sg, urb->num_sgs, i) {
+	for_each_sg(urb->sg, sg, urb->num_mapped_sgs, i) {
 		size_t len;
 		size_t sg_remaining;
 		void *orig;
@@ -739,7 +739,7 @@ static int get_urb_status_from_qtd(struct urb *urb, u32 status)
  * process_inactive_qtd - process an inactive (but not halted) qTD.
  *
  * Update the urb with the transfer bytes from the qTD, if the urb is
- * completely transfered or (in the case of an IN only) the LPF is
+ * completely transferred or (in the case of an IN only) the LPF is
  * set, then the transfer is complete and the urb should be returned
  * to the system.
  */

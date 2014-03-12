@@ -91,7 +91,7 @@
 #define SIZE_4K	(1UL << SHIFT_4K)
 #define MASK_4K	(~(SIZE_4K-1))
 
-					/* support upto 512KB in one RDMA */
+					/* support up to 512KB in one RDMA */
 #define ISCSI_ISER_SG_TABLESIZE         (0x80000 >> SHIFT_4K)
 #define ISER_DEF_CMD_PER_LUN		128
 
@@ -365,4 +365,5 @@ int iser_dma_map_task_data(struct iscsi_iser_task *iser_task,
 void iser_dma_unmap_task_data(struct iscsi_iser_task *iser_task);
 int  iser_initialize_task_headers(struct iscsi_task *task,
 			struct iser_tx_desc *tx_desc);
+int iser_alloc_rx_descriptors(struct iser_conn *ib_conn);
 #endif

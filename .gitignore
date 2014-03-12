@@ -28,9 +28,11 @@ modules.builtin
 *.gz
 *.bz2
 *.lzma
+*.xz
 *.lzo
 *.patch
 *.gcno
+Untitled Project.*
 
 #
 # Top-level generic files
@@ -43,6 +45,7 @@ modules.builtin
 /System.map
 /Module.markers
 /Module.symvers
+/kernel.img
 
 #
 # git files that we don't want to ignore even it they are dot-files
@@ -56,6 +59,7 @@ modules.builtin
 include/config
 include/linux/version.h
 include/generated
+arch/*/include/generated
 
 # stgit generated dirs
 patches-*

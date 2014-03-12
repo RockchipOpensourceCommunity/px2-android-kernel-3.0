@@ -60,6 +60,7 @@
 #include <linux/gfp.h>
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
+#include <linux/prefetch.h>
 #include "registers.h"
 #include "hw.h"
 #include "dma.h"
@@ -361,7 +362,10 @@ static void ioat3_timer_event(unsigned long data)
 			chanerr = readl(chan->reg_base + IOAT_CHANERR_OFFSET);
 			dev_err(to_dev(chan), "%s: Channel halted (%x)\n",
 				__func__, chanerr);
-			BUG_ON(is_ioat_bug(chanerr));
+			if (test_bit(IOAT_RUN, &chan->state))
+				BUG_ON(is_ioat_bug(chanerr));
+			else /* we never got off the ground */
+				return;
 		}
 
 		/* if we haven't made progress and we have already
@@ -945,7 +949,7 @@ static int __devinit ioat_xor_val_self_test(struct ioatdma_device *device)
 			goto free_resources;
 		}
 	}
-	dma_sync_single_for_device(dev, dest_dma, PAGE_SIZE, DMA_TO_DEVICE);
+	dma_sync_single_for_device(dev, dest_dma, PAGE_SIZE, DMA_FROM_DEVICE);
 
 	/* skip validate if the capability is not present */
 	if (!dma_has_cap(DMA_XOR_VAL, dma_chan->device->cap_mask))

@@ -139,9 +139,7 @@ static int usb_stor_msg_common(struct us_data *us, int timeout)
 
 	/* fill the common fields in the URB */
 	us->current_urb->context = &urb_done;
-	us->current_urb->actual_length = 0;
-	us->current_urb->error_count = 0;
-	us->current_urb->status = 0;
+	us->current_urb->transfer_flags = 0;
 
 	/* we assume that if transfer_buffer isn't us->iobuf then it
 	 * hasn't been mapped for DMA.  Yes, this is clunky, but it's
@@ -644,7 +642,7 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
 	 * unless the operation involved a data-in transfer.  Devices
 	 * can signal most data-in errors by stalling the bulk-in pipe.
 	 */
-	if ((us->protocol == US_PR_CB || us->protocol == US_PR_DPCM_USB) &&
+	if ((us->protocol == USB_PR_CB || us->protocol == USB_PR_DPCM_USB) &&
 			srb->sc_data_direction != DMA_FROM_DEVICE) {
 		US_DEBUGP("-- CB transport device requiring auto-sense\n");
 		need_auto_sense = 1;
@@ -693,6 +691,9 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
 		int temp_result;
 		struct scsi_eh_save ses;
 		int sense_size = US_SENSE_SIZE;
+		struct scsi_sense_hdr sshdr;
+		const u8 *scdd;
+		u8 fm_ili;
 
 		/* device supports and needs bigger sense buffer */
 		if (us->fflags & US_FL_SANE_SENSE)
@@ -703,8 +704,8 @@ Retry_Sense:
 		scsi_eh_prep_cmnd(srb, &ses, NULL, 0, sense_size);
 
 		/* FIXME: we must do the protocol translation here */
-		if (us->subclass == US_SC_RBC || us->subclass == US_SC_SCSI ||
-				us->subclass == US_SC_CYP_ATACB)
+		if (us->subclass == USB_SC_RBC || us->subclass == USB_SC_SCSI ||
+				us->subclass == USB_SC_CYP_ATACB)
 			srb->cmd_len = 6;
 		else
 			srb->cmd_len = 12;
@@ -776,32 +777,30 @@ Retry_Sense:
 			srb->sense_buffer[7] = (US_SENSE_SIZE - 8);
 		}
 
+		scsi_normalize_sense(srb->sense_buffer, SCSI_SENSE_BUFFERSIZE,
+				     &sshdr);
+
 		US_DEBUGP("-- Result from auto-sense is %d\n", temp_result);
 		US_DEBUGP("-- code: 0x%x, key: 0x%x, ASC: 0x%x, ASCQ: 0x%x\n",
-			  srb->sense_buffer[0],
-			  srb->sense_buffer[2] & 0xf,
-			  srb->sense_buffer[12], 
-			  srb->sense_buffer[13]);
+			  sshdr.response_code, sshdr.sense_key,
+			  sshdr.asc, sshdr.ascq);
 #ifdef CONFIG_USB_STORAGE_DEBUG
-		usb_stor_show_sense(
-			  srb->sense_buffer[2] & 0xf,
-			  srb->sense_buffer[12], 
-			  srb->sense_buffer[13]);
+		usb_stor_show_sense(sshdr.sense_key, sshdr.asc, sshdr.ascq);
 #endif
 
 		/* set the result so the higher layers expect this data */
 		srb->result = SAM_STAT_CHECK_CONDITION;
 
+		scdd = scsi_sense_desc_find(srb->sense_buffer,
+					    SCSI_SENSE_BUFFERSIZE, 4);
+		fm_ili = (scdd ? scdd[3] : srb->sense_buffer[2]) & 0xA0;
+
 		/* We often get empty sense data.  This could indicate that
 		 * everything worked or that there was an unspecified
 		 * problem.  We have to decide which.
 		 */
-		if (	/* Filemark 0, ignore EOM, ILI 0, no sense */
-				(srb->sense_buffer[2] & 0xaf) == 0 &&
-			/* No ASC or ASCQ */
-				srb->sense_buffer[12] == 0 &&
-				srb->sense_buffer[13] == 0) {
-
+		if (sshdr.sense_key == 0 && sshdr.asc == 0 && sshdr.ascq == 0 &&
+		    fm_ili == 0) {
 			/* If things are really okay, then let's show that.
 			 * Zero out the sense buffer so the higher layers
 			 * won't realize we did an unsolicited auto-sense.
@@ -816,8 +815,40 @@ Retry_Sense:
 			 */
 			} else {
 				srb->result = DID_ERROR << 16;
-				srb->sense_buffer[2] = HARDWARE_ERROR;
+				if ((sshdr.response_code & 0x72) == 0x72)
+					srb->sense_buffer[1] = HARDWARE_ERROR;
+				else
+					srb->sense_buffer[2] = HARDWARE_ERROR;
 			}
+		}
+	}
+
+	/*
+	 * Some devices don't work or return incorrect data the first
+	 * time they get a READ(10) command, or for the first READ(10)
+	 * after a media change.  If the INITIAL_READ10 flag is set,
+	 * keep track of whether READ(10) commands succeed.  If the
+	 * previous one succeeded and this one failed, set the REDO_READ10
+	 * flag to force a retry.
+	 */
+	if (unlikely((us->fflags & US_FL_INITIAL_READ10) &&
+			srb->cmnd[0] == READ_10)) {
+		if (srb->result == SAM_STAT_GOOD) {
+			set_bit(US_FLIDX_READ10_WORKED, &us->dflags);
+		} else if (test_bit(US_FLIDX_READ10_WORKED, &us->dflags)) {
+			clear_bit(US_FLIDX_READ10_WORKED, &us->dflags);
+			set_bit(US_FLIDX_REDO_READ10, &us->dflags);
+		}
+
+		/*
+		 * Next, if the REDO_READ10 flag is set, return a result
+		 * code that will cause the SCSI core to retry the READ(10)
+		 * command immediately.
+		 */
+		if (test_bit(US_FLIDX_REDO_READ10, &us->dflags)) {
+			clear_bit(US_FLIDX_REDO_READ10, &us->dflags);
+			srb->result = DID_IMM_RETRY << 16;
+			srb->sense_buffer[0] = 0;
 		}
 	}
 
@@ -928,7 +959,7 @@ int usb_stor_CB_transport(struct scsi_cmnd *srb, struct us_data *us)
 	/* NOTE: CB does not have a status stage.  Silly, I know.  So
 	 * we have to catch this at a higher level.
 	 */
-	if (us->protocol != US_PR_CBI)
+	if (us->protocol != USB_PR_CBI)
 		return USB_STOR_TRANSPORT_GOOD;
 
 	result = usb_stor_intr_transfer(us, us->iobuf, 2);
@@ -944,7 +975,7 @@ int usb_stor_CB_transport(struct scsi_cmnd *srb, struct us_data *us)
 	 * that this means we could be ignoring a real error on these
 	 * commands, but that can't be helped.
 	 */
-	if (us->subclass == US_SC_UFI) {
+	if (us->subclass == USB_SC_UFI) {
 		if (srb->cmnd[0] == REQUEST_SENSE ||
 		    srb->cmnd[0] == INQUIRY)
 			return USB_STOR_TRANSPORT_GOOD;

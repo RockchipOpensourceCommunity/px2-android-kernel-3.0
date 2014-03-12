@@ -31,6 +31,7 @@
 #include <linux/kref.h>
 #include <linux/rculist.h>
 #include <linux/interrupt.h>
+#include <linux/slab.h>
 #include <acpi/atomicio.h>
 
 #define ACPI_PFX "ACPI: "
@@ -75,7 +76,7 @@ static void __iomem *__acpi_ioremap_fast(phys_addr_t paddr,
 {
 	struct acpi_iomap *map;
 
-	map = __acpi_find_iomap(paddr, size);
+	map = __acpi_find_iomap(paddr, size/8);
 	if (map)
 		return map->vaddr + (paddr - map->paddr);
 	else
@@ -141,7 +142,7 @@ static void __iomem *acpi_pre_map(phys_addr_t paddr,
 	list_add_tail_rcu(&map->list, &acpi_iomaps);
 	spin_unlock_irqrestore(&acpi_iomaps_lock, flags);
 
-	return vaddr + (paddr - pg_off);
+	return map->vaddr + (paddr - map->paddr);
 err_unmap:
 	iounmap(vaddr);
 	return NULL;
@@ -279,9 +280,11 @@ static int acpi_atomic_read_mem(u64 paddr, u64 *val, u32 width)
 	case 32:
 		*val = readl(addr);
 		break;
+#ifdef readq
 	case 64:
 		*val = readq(addr);
 		break;
+#endif
 	default:
 		return -EINVAL;
 	}
@@ -306,9 +309,11 @@ static int acpi_atomic_write_mem(u64 paddr, u64 val, u32 width)
 	case 32:
 		writel(val, addr);
 		break;
+#ifdef writeq
 	case 64:
 		writeq(val, addr);
 		break;
+#endif
 	default:
 		return -EINVAL;
 	}

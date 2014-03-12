@@ -12,11 +12,14 @@
  *  2 of the License, or (at your option) any later version.
  */
 
+#include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <asm/cputable.h>
 #include <asm/code-patching.h>
+#include <asm/page.h>
+#include <asm/sections.h>
 
 
 struct fixup_entry {
@@ -125,6 +128,27 @@ void do_lwsync_fixups(unsigned long value, void *fixup_start, void *fixup_end)
 		dest = (void *)start + *start;
 		patch_instruction(dest, PPC_INST_LWSYNC);
 	}
+}
+
+void do_final_fixups(void)
+{
+#if defined(CONFIG_PPC64) && defined(CONFIG_RELOCATABLE)
+	int *src, *dest;
+	unsigned long length;
+
+	if (PHYSICAL_START == 0)
+		return;
+
+	src = (int *)(KERNELBASE + PHYSICAL_START);
+	dest = (int *)KERNELBASE;
+	length = (__end_interrupts - _stext) / sizeof(int);
+
+	while (length--) {
+		patch_instruction(dest, *src);
+		src++;
+		dest++;
+	}
+#endif
 }
 
 #ifdef CONFIG_FTR_FIXUP_SELFTEST
@@ -288,8 +312,8 @@ static void test_alternative_case_with_external_branch(void)
 
 static void test_cpu_macros(void)
 {
-	extern void ftr_fixup_test_FTR_macros;
-	extern void ftr_fixup_test_FTR_macros_expected;
+	extern u8 ftr_fixup_test_FTR_macros;
+	extern u8 ftr_fixup_test_FTR_macros_expected;
 	unsigned long size = &ftr_fixup_test_FTR_macros_expected -
 			     &ftr_fixup_test_FTR_macros;
 
@@ -301,8 +325,8 @@ static void test_cpu_macros(void)
 static void test_fw_macros(void)
 {
 #ifdef CONFIG_PPC64
-	extern void ftr_fixup_test_FW_FTR_macros;
-	extern void ftr_fixup_test_FW_FTR_macros_expected;
+	extern u8 ftr_fixup_test_FW_FTR_macros;
+	extern u8 ftr_fixup_test_FW_FTR_macros_expected;
 	unsigned long size = &ftr_fixup_test_FW_FTR_macros_expected -
 			     &ftr_fixup_test_FW_FTR_macros;
 
@@ -314,10 +338,10 @@ static void test_fw_macros(void)
 
 static void test_lwsync_macros(void)
 {
-	extern void lwsync_fixup_test;
-	extern void end_lwsync_fixup_test;
-	extern void lwsync_fixup_test_expected_LWSYNC;
-	extern void lwsync_fixup_test_expected_SYNC;
+	extern u8 lwsync_fixup_test;
+	extern u8 end_lwsync_fixup_test;
+	extern u8 lwsync_fixup_test_expected_LWSYNC;
+	extern u8 lwsync_fixup_test_expected_SYNC;
 	unsigned long size = &end_lwsync_fixup_test -
 			     &lwsync_fixup_test;
 

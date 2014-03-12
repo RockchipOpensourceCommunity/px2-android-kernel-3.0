@@ -8,6 +8,8 @@
  *  Copyright (C) 1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
 
+#include <linux/const.h>
+
 #ifndef __ASSEMBLY__
 #include <asm-generic/4level-fixup.h>
 
@@ -142,13 +144,12 @@ BTFIXUPDEF_CALL_CONST(unsigned long, pgd_page_vaddr, pgd_t)
 #define pmd_page(pmd) BTFIXUP_CALL(pmd_page)(pmd)
 #define pgd_page_vaddr(pgd) BTFIXUP_CALL(pgd_page_vaddr)(pgd)
 
-BTFIXUPDEF_SETHI(none_mask)
 BTFIXUPDEF_CALL_CONST(int, pte_present, pte_t)
 BTFIXUPDEF_CALL(void, pte_clear, pte_t *)
 
 static inline int pte_none(pte_t pte)
 {
-	return !(pte_val(pte) & ~BTFIXUP_SETHI(none_mask));
+	return !pte_val(pte);
 }
 
 #define pte_present(pte) BTFIXUP_CALL(pte_present)(pte)
@@ -160,7 +161,7 @@ BTFIXUPDEF_CALL(void, pmd_clear, pmd_t *)
 
 static inline int pmd_none(pmd_t pmd)
 {
-	return !(pmd_val(pmd) & ~BTFIXUP_SETHI(none_mask));
+	return !pmd_val(pmd);
 }
 
 #define pmd_bad(pmd) BTFIXUP_CALL(pmd_bad)(pmd)
@@ -305,10 +306,7 @@ BTFIXUPDEF_CALL(pte_t *, pte_offset_kernel, pmd_t *, unsigned long)
  * and sun4c is guaranteed to have no highmem anyway.
  */
 #define pte_offset_map(d, a)		pte_offset_kernel(d,a)
-#define pte_offset_map_nested(d, a)	pte_offset_kernel(d,a)
-
 #define pte_unmap(pte)		do{}while(0)
-#define pte_unmap_nested(pte)	do{}while(0)
 
 /* Certain architectures need to do special things when pte's
  * within a page table are directly modified.  Thus, the following
@@ -433,10 +431,6 @@ extern unsigned long *sparc_valid_addr_bitmap;
 #define kern_addr_valid(addr) \
 	(test_bit(__pa((unsigned long)(addr))>>20, sparc_valid_addr_bitmap))
 
-extern int io_remap_pfn_range(struct vm_area_struct *vma,
-			      unsigned long from, unsigned long pfn,
-			      unsigned long size, pgprot_t prot);
-
 /*
  * For sparc32&64, the pfn in io_remap_pfn_range() carries <iospace> in
  * its high 4 bits.  These macros/functions put it there or get it from there.
@@ -444,6 +438,22 @@ extern int io_remap_pfn_range(struct vm_area_struct *vma,
 #define MK_IOSPACE_PFN(space, pfn)	(pfn | (space << (BITS_PER_LONG - 4)))
 #define GET_IOSPACE(pfn)		(pfn >> (BITS_PER_LONG - 4))
 #define GET_PFN(pfn)			(pfn & 0x0fffffffUL)
+
+extern int remap_pfn_range(struct vm_area_struct *, unsigned long, unsigned long,
+			   unsigned long, pgprot_t);
+
+static inline int io_remap_pfn_range(struct vm_area_struct *vma,
+				     unsigned long from, unsigned long pfn,
+				     unsigned long size, pgprot_t prot)
+{
+	unsigned long long offset, space, phys_base;
+
+	offset = ((unsigned long long) GET_PFN(pfn)) << PAGE_SHIFT;
+	space = GET_IOSPACE(pfn);
+	phys_base = offset | (space << 32ULL);
+
+	return remap_pfn_range(vma, from, phys_base >> PAGE_SHIFT, size, prot);
+}
 
 #define __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
 #define ptep_set_access_flags(__vma, __address, __ptep, __entry, __dirty) \
@@ -460,9 +470,9 @@ extern int io_remap_pfn_range(struct vm_area_struct *vma,
 
 #endif /* !(__ASSEMBLY__) */
 
-#define VMALLOC_START           0xfe600000
+#define VMALLOC_START           _AC(0xfe600000,UL)
 /* XXX Alter this when I get around to fixing sun4c - Anton */
-#define VMALLOC_END             0xffc00000
+#define VMALLOC_END             _AC(0xffc00000,UL)
 
 
 /* We provide our own get_unmapped_area to cope with VA holes for userland */

@@ -38,7 +38,7 @@
 #define	DRV_NAME	"ks8851_mll"
 
 static u8 KS_DEFAULT_MAC_ADDRESS[] = { 0x00, 0x10, 0xA1, 0x86, 0x95, 0x11 };
-#define MAX_RECV_FRAMES			32
+#define MAX_RECV_FRAMES			255
 #define MAX_BUF_SIZE			2048
 #define TX_BUF_SIZE			2000
 #define RX_BUF_SIZE			2000
@@ -470,7 +470,7 @@ static int msg_enable;
  *
  * All these calls issue transactions to access the chip's registers. They
  * all require that the necessary lock is held to prevent accesses when the
- * chip is busy transfering packet data (RX/TX FIFO accesses).
+ * chip is busy transferring packet data (RX/TX FIFO accesses).
  */
 
 /**
@@ -1364,7 +1364,7 @@ static int ks_phy_reg(int reg)
  * @reg: The register to read.
  *
  * This call reads data from the PHY register specified in @reg. Since the
- * device does not support all the MII registers, the non-existant values
+ * device does not support all the MII registers, the non-existent values
  * are always returned as zero.
  *
  * We return zero for unsupported registers as the MII code does not check

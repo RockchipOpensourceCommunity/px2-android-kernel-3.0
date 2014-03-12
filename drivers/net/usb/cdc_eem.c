@@ -93,6 +93,7 @@ static int eem_bind(struct usbnet *dev, struct usb_interface *intf)
 	/* no jumbogram (16K) support for now */
 
 	dev->net->hard_header_len += EEM_HEAD + ETH_FCS_LEN;
+	dev->hard_mtu = dev->net->mtu + dev->net->hard_header_len;
 
 	return 0;
 }
@@ -190,7 +191,7 @@ static int eem_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 
 		/*
 		 * EEM packet header format:
-		 * b0..14:	EEM type dependant (Data or Command)
+		 * b0..14:	EEM type dependent (Data or Command)
 		 * b15:		bmType
 		 */
 		header = get_unaligned_le16(skb->data);
@@ -340,7 +341,7 @@ next:
 
 static const struct driver_info eem_info = {
 	.description =	"CDC EEM Device",
-	.flags =	FLAG_ETHER,
+	.flags =	FLAG_ETHER | FLAG_POINTTOPOINT,
 	.bind =		eem_bind,
 	.rx_fixup =	eem_rx_fixup,
 	.tx_fixup =	eem_tx_fixup,

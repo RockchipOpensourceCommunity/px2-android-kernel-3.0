@@ -26,6 +26,7 @@
 #include "drmP.h"
 #include "radeon_drm.h"
 #include "radeon.h"
+#include "radeon_asic.h"
 #include "atom.h"
 
 /*
@@ -195,6 +196,13 @@ static void r600_hdmi_videoinfoframe(
 	frame[0xD] = (right_bar >> 8);
 
 	r600_hdmi_infoframe_checksum(0x82, 0x02, 0x0D, frame);
+	/* Our header values (type, version, length) should be alright, Intel
+	 * is using the same. Checksum function also seems to be OK, it works
+	 * fine for audio infoframe. However calculated value is always lower
+	 * by 2 in comparison to fglrx. It breaks displaying anything in case
+	 * of TVs that strictly check the checksum. Hack it manually here to
+	 * workaround this issue. */
+	frame[0x0] += 2;
 
 	WREG32(offset+R600_HDMI_VIDEOINFOFRAME_0,
 		frame[0x0] | (frame[0x1] << 8) | (frame[0x2] << 16) | (frame[0x3] << 24));
@@ -333,7 +341,7 @@ void r600_hdmi_setmode(struct drm_encoder *encoder, struct drm_display_mode *mod
 	r600_hdmi_videoinfoframe(encoder, RGB, 0, 0, 0, 0,
 		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
-	/* it's unknown what these bits do excatly, but it's indeed quite usefull for debugging */
+	/* it's unknown what these bits do excatly, but it's indeed quite useful for debugging */
 	WREG32(offset+R600_HDMI_AUDIO_DEBUG_0, 0x00FFFFFF);
 	WREG32(offset+R600_HDMI_AUDIO_DEBUG_1, 0x007FFFFF);
 	WREG32(offset+R600_HDMI_AUDIO_DEBUG_2, 0x00000001);
@@ -435,7 +443,8 @@ static int r600_hdmi_find_free_block(struct drm_device *dev)
 		}
 	}
 
-	if (rdev->family == CHIP_RS600 || rdev->family == CHIP_RS690) {
+	if (rdev->family == CHIP_RS600 || rdev->family == CHIP_RS690 ||
+	    rdev->family == CHIP_RS740) {
 		return free_blocks[0] ? R600_HDMI_BLOCK1 : 0;
 	} else if (rdev->family >= CHIP_R600) {
 		if (free_blocks[0])
@@ -466,7 +475,8 @@ static void r600_hdmi_assign_block(struct drm_encoder *encoder)
 		if (ASIC_IS_DCE32(rdev))
 			radeon_encoder->hdmi_config_offset = dig->dig_encoder ?
 				R600_HDMI_CONFIG2 : R600_HDMI_CONFIG1;
-	} else if (rdev->family >= CHIP_R600) {
+	} else if (rdev->family >= CHIP_R600 || rdev->family == CHIP_RS600 ||
+		   rdev->family == CHIP_RS690 || rdev->family == CHIP_RS740) {
 		radeon_encoder->hdmi_offset = r600_hdmi_find_free_block(dev);
 	}
 }

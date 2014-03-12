@@ -131,13 +131,7 @@ static void * __init pcpu_fc_alloc(unsigned int cpu, size_t size, size_t align)
 
 static void __init pcpu_fc_free(void *ptr, size_t size)
 {
-#ifdef CONFIG_NO_BOOTMEM
-	u64 start = __pa(ptr);
-	u64 end = start + size;
-	free_early_partial(start, end);
-#else
 	free_bootmem(__pa(ptr), size);
-#endif
 }
 
 static int __init pcpu_cpu_distance(unsigned int from, unsigned int to)
@@ -191,10 +185,22 @@ void __init setup_per_cpu_areas(void)
 #endif
 	rc = -EINVAL;
 	if (pcpu_chosen_fc != PCPU_FC_PAGE) {
-		const size_t atom_size = cpu_has_pse ? PMD_SIZE : PAGE_SIZE;
 		const size_t dyn_size = PERCPU_MODULE_RESERVE +
 			PERCPU_DYNAMIC_RESERVE - PERCPU_FIRST_CHUNK_RESERVE;
+		size_t atom_size;
 
+		/*
+		 * On 64bit, use PMD_SIZE for atom_size so that embedded
+		 * percpu areas are aligned to PMD.  This, in the future,
+		 * can also allow using PMD mappings in vmalloc area.  Use
+		 * PAGE_SIZE on 32bit as vmalloc space is highly contended
+		 * and large vmalloc area allocs can easily fail.
+		 */
+#ifdef CONFIG_X86_64
+		atom_size = PMD_SIZE;
+#else
+		atom_size = PAGE_SIZE;
+#endif
 		rc = pcpu_embed_first_chunk(PERCPU_FIRST_CHUNK_RESERVE,
 					    dyn_size, atom_size,
 					    pcpu_cpu_distance,
@@ -231,20 +237,33 @@ void __init setup_per_cpu_areas(void)
 		per_cpu(x86_bios_cpu_apicid, cpu) =
 			early_per_cpu_map(x86_bios_cpu_apicid, cpu);
 #endif
+#ifdef CONFIG_X86_32
+		per_cpu(x86_cpu_to_logical_apicid, cpu) =
+			early_per_cpu_map(x86_cpu_to_logical_apicid, cpu);
+#endif
 #ifdef CONFIG_X86_64
 		per_cpu(irq_stack_ptr, cpu) =
 			per_cpu(irq_stack_union.irq_stack, cpu) +
 			IRQ_STACK_SIZE - 64;
+#endif
 #ifdef CONFIG_NUMA
 		per_cpu(x86_cpu_to_node_map, cpu) =
 			early_per_cpu_map(x86_cpu_to_node_map, cpu);
-#endif
+		/*
+		 * Ensure that the boot cpu numa_node is correct when the boot
+		 * cpu is on a node that doesn't have memory installed.
+		 * Also cpu_up() will call cpu_to_node() for APs when
+		 * MEMORY_HOTPLUG is defined, before per_cpu(numa_node) is set
+		 * up later with c_init aka intel_init/amd_init.
+		 * So set them all (boot cpu and all APs).
+		 */
+		set_cpu_numa_node(cpu, early_cpu_to_node(cpu));
 #endif
 		/*
 		 * Up to this point, the boot CPU has been using .init.data
 		 * area.  Reload any changed state for the boot CPU.
 		 */
-		if (cpu == boot_cpu_id)
+		if (!cpu)
 			switch_to_new_gdt(cpu);
 	}
 
@@ -253,16 +272,11 @@ void __init setup_per_cpu_areas(void)
 	early_per_cpu_ptr(x86_cpu_to_apicid) = NULL;
 	early_per_cpu_ptr(x86_bios_cpu_apicid) = NULL;
 #endif
-#if defined(CONFIG_X86_64) && defined(CONFIG_NUMA)
-	early_per_cpu_ptr(x86_cpu_to_node_map) = NULL;
+#ifdef CONFIG_X86_32
+	early_per_cpu_ptr(x86_cpu_to_logical_apicid) = NULL;
 #endif
-
-#if defined(CONFIG_X86_64) && defined(CONFIG_NUMA)
-	/*
-	 * make sure boot cpu numa_node is right, when boot cpu is on the
-	 * node that doesn't have mem installed
-	 */
-	set_cpu_numa_node(boot_cpu_id, early_cpu_to_node(boot_cpu_id));
+#ifdef CONFIG_NUMA
+	early_per_cpu_ptr(x86_cpu_to_node_map) = NULL;
 #endif
 
 	/* Setup node to cpumask map */

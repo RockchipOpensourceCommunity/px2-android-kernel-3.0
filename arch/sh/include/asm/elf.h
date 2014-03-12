@@ -50,25 +50,14 @@
 #define	R_SH_GOTPC		167
 
 /* FDPIC relocs */
-#define R_SH_GOT20		70
-#define R_SH_GOTOFF20		71
-#define R_SH_GOTFUNCDESC	72
-#define R_SH_GOTFUNCDESC20	73
-#define R_SH_GOTOFFFUNCDESC	74
-#define R_SH_GOTOFFFUNCDESC20	75
-#define R_SH_FUNCDESC		76
-#define R_SH_FUNCDESC_VALUE	77
-
-#if 0 /* XXX - later .. */
-#define R_SH_GOT20		198
-#define R_SH_GOTOFF20		199
-#define R_SH_GOTFUNCDESC	200
-#define R_SH_GOTFUNCDESC20	201
-#define R_SH_GOTOFFFUNCDESC	202
-#define R_SH_GOTOFFFUNCDESC20	203
-#define R_SH_FUNCDESC		204
-#define R_SH_FUNCDESC_VALUE	205
-#endif
+#define R_SH_GOT20		201
+#define R_SH_GOTOFF20		202
+#define R_SH_GOTFUNCDESC	203
+#define R_SH_GOTFUNCDESC20	204
+#define R_SH_GOTOFFFUNCDESC	205
+#define R_SH_GOTOFFFUNCDESC20	206
+#define R_SH_FUNCDESC		207
+#define R_SH_FUNCDESC_VALUE	208
 
 /* SHmedia relocs */
 #define R_SH_IMM_LOW16		246
@@ -213,9 +202,9 @@ extern void __kernel_vsyscall;
 	if (vdso_enabled)					\
 		NEW_AUX_ENT(AT_SYSINFO_EHDR, VDSO_BASE);	\
 	else							\
-		NEW_AUX_ENT(AT_IGNORE, 0);
+		NEW_AUX_ENT(AT_IGNORE, 0)
 #else
-#define VSYSCALL_AUX_ENT
+#define VSYSCALL_AUX_ENT	NEW_AUX_ENT(AT_IGNORE, 0)
 #endif /* CONFIG_VSYSCALL */
 
 #ifdef CONFIG_SH_FPU

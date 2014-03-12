@@ -19,6 +19,8 @@ static void pci_free_resources(struct pci_dev *dev)
 
 static void pci_stop_dev(struct pci_dev *dev)
 {
+	pci_pme_active(dev, false);
+
 	if (dev->is_added) {
 		pci_proc_detach_device(dev);
 		pci_remove_sysfs_dev_files(dev);
@@ -73,8 +75,6 @@ void pci_remove_bus(struct pci_bus *pci_bus)
 		return;
 
 	pci_remove_legacy_files(pci_bus);
-	device_remove_file(&pci_bus->dev, &dev_attr_cpuaffinity);
-	device_remove_file(&pci_bus->dev, &dev_attr_cpulistaffinity);
 	device_unregister(&pci_bus->dev);
 }
 EXPORT_SYMBOL(pci_remove_bus);

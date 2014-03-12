@@ -33,6 +33,7 @@ struct signalfd_siginfo {
 	__u64 ssi_utime;
 	__u64 ssi_stime;
 	__u64 ssi_addr;
+	__u16 ssi_addr_lsb;
 
 	/*
 	 * Pad strcture to 128 bytes. Remember to update the
@@ -43,7 +44,7 @@ struct signalfd_siginfo {
 	 * comes out of a read(2) and we really don't want to have
 	 * a compat on read(2).
 	 */
-	__u8 __pad[48];
+	__u8 __pad[46];
 };
 
 
@@ -60,13 +61,16 @@ static inline void signalfd_notify(struct task_struct *tsk, int sig)
 		wake_up(&tsk->sighand->signalfd_wqh);
 }
 
+extern void signalfd_cleanup(struct sighand_struct *sighand);
+
 #else /* CONFIG_SIGNALFD */
 
 static inline void signalfd_notify(struct task_struct *tsk, int sig) { }
+
+static inline void signalfd_cleanup(struct sighand_struct *sighand) { }
 
 #endif /* CONFIG_SIGNALFD */
 
 #endif /* __KERNEL__ */
 
 #endif /* _LINUX_SIGNALFD_H */
-

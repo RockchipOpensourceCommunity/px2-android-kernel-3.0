@@ -38,6 +38,7 @@
 #include <asm/delay.h>
 #include <asm/irq.h>
 #include <asm/io.h>
+#include <mach/gpio.h>
 
 #include "dm9000.h"
 
@@ -131,13 +132,10 @@ typedef struct board_info {
 	u32		msg_enable;
 	u32		wake_state;
 
-	int		rx_csum;
-	int		can_csum;
 	int		ip_summed;
 } board_info_t;
 
 /* debug code */
-
 #define dm9000_dbg(db, lev, msg...) do {		\
 	if ((lev) < CONFIG_DM9000_DEBUGLEVEL &&		\
 	    (lev) < db->debug_level) {			\
@@ -312,7 +310,7 @@ dm9000_read_locked(board_info_t *db, int reg)
 	unsigned long flags;
 	unsigned int ret;
 
-	spin_lock_irqsave(&db->lock, flags);
+	spin_lock_irqsave(&db->lock, flags);	
 	ret = ior(db, reg);
 	spin_unlock_irqrestore(&db->lock, flags);
 
@@ -367,9 +365,9 @@ dm9000_read_eeprom(board_info_t *db, int offset, u8 *to)
 	}
 
 	mutex_lock(&db->addr_lock);
-
+	
 	spin_lock_irqsave(&db->lock, flags);
-
+		
 	iow(db, DM9000_EPAR, offset);
 	iow(db, DM9000_EPCR, EPCR_ERPRR);
 
@@ -379,9 +377,9 @@ dm9000_read_eeprom(board_info_t *db, int offset, u8 *to)
 
 	/* delay for at-least 150uS */
 	msleep(1);
-
+	
 	spin_lock_irqsave(&db->lock, flags);
-
+	
 	iow(db, DM9000_EPCR, 0x0);
 
 	to[0] = ior(db, DM9000_EPDRL);
@@ -404,8 +402,8 @@ dm9000_write_eeprom(board_info_t *db, int offset, u8 *data)
 		return;
 
 	mutex_lock(&db->addr_lock);
-
-	spin_lock_irqsave(&db->lock, flags);
+	
+	spin_lock_irqsave(&db->lock, flags);	
 	iow(db, DM9000_EPAR, offset);
 	iow(db, DM9000_EPDRH, data[1]);
 	iow(db, DM9000_EPDRL, data[0]);
@@ -415,7 +413,7 @@ dm9000_write_eeprom(board_info_t *db, int offset, u8 *data)
 	dm9000_wait_eeprom(db);
 
 	mdelay(1);	/* wait at least 150uS to clear */
-
+	
 	spin_lock_irqsave(&db->lock, flags);
 	iow(db, DM9000_EPCR, 0);
 	spin_unlock_irqrestore(&db->lock, flags);
@@ -470,47 +468,20 @@ static int dm9000_nway_reset(struct net_device *dev)
 	return mii_nway_restart(&dm->mii);
 }
 
-static uint32_t dm9000_get_rx_csum(struct net_device *dev)
+static int dm9000_set_features(struct net_device *dev, u32 features)
 {
 	board_info_t *dm = to_dm9000_board(dev);
-	return dm->rx_csum;
-}
-
-static int dm9000_set_rx_csum_unlocked(struct net_device *dev, uint32_t data)
-{
-	board_info_t *dm = to_dm9000_board(dev);
-
-	if (dm->can_csum) {
-		dm->rx_csum = data;
-		iow(dm, DM9000_RCSR, dm->rx_csum ? RCSR_CSUM : 0);
-
-		return 0;
-	}
-
-	return -EOPNOTSUPP;
-}
-
-static int dm9000_set_rx_csum(struct net_device *dev, uint32_t data)
-{
-	board_info_t *dm = to_dm9000_board(dev);
+	u32 changed = dev->features ^ features;
 	unsigned long flags;
-	int ret;
+
+	if (!(changed & NETIF_F_RXCSUM))
+		return 0;
 
 	spin_lock_irqsave(&dm->lock, flags);
-	ret = dm9000_set_rx_csum_unlocked(dev, data);
+	iow(dm, DM9000_RCSR, (features & NETIF_F_RXCSUM) ? RCSR_CSUM : 0);
 	spin_unlock_irqrestore(&dm->lock, flags);
 
-	return ret;
-}
-
-static int dm9000_set_tx_csum(struct net_device *dev, uint32_t data)
-{
-	board_info_t *dm = to_dm9000_board(dev);
-	int ret = -EOPNOTSUPP;
-
-	if (dm->can_csum)
-		ret = ethtool_op_set_tx_csum(dev, data);
-	return ret;
+	return 0;
 }
 
 static u32 dm9000_get_link(struct net_device *dev)
@@ -621,9 +592,9 @@ static int dm9000_set_wol(struct net_device *dev, struct ethtool_wolinfo *w)
 		/* change in wol state, update IRQ state */
 
 		if (!dm->wake_state)
-			set_irq_wake(dm->irq_wake, 1);
+			irq_set_irq_wake(dm->irq_wake, 1);
 		else if (dm->wake_state & !opts)
-			set_irq_wake(dm->irq_wake, 0);
+			irq_set_irq_wake(dm->irq_wake, 0);
 	}
 
 	dm->wake_state = opts;
@@ -643,10 +614,6 @@ static const struct ethtool_ops dm9000_ethtool_ops = {
  	.get_eeprom_len		= dm9000_get_eeprom_len,
  	.get_eeprom		= dm9000_get_eeprom,
  	.set_eeprom		= dm9000_set_eeprom,
-	.get_rx_csum		= dm9000_get_rx_csum,
-	.set_rx_csum		= dm9000_set_rx_csum,
-	.get_tx_csum		= ethtool_op_get_tx_csum,
-	.set_tx_csum		= dm9000_set_tx_csum,
 };
 
 static void dm9000_show_carrier(board_info_t *db,
@@ -800,12 +767,11 @@ dm9000_init_dm9000(struct net_device *dev)
 	db->io_mode = ior(db, DM9000_ISR) >> 6;	/* ISR bit7:6 keeps I/O mode */
 
 	/* Checksum mode */
-	dm9000_set_rx_csum_unlocked(dev, db->rx_csum);
+	if (dev->hw_features & NETIF_F_RXCSUM)
+		iow(db, DM9000_RCSR,
+			(dev->features & NETIF_F_RXCSUM) ? RCSR_CSUM : 0);
 
-	/* GPIO0 on pre-activate PHY */
-	iow(db, DM9000_GPR, 0);	/* REG_1F bit0 activate phyxcer */
 	iow(db, DM9000_GPCR, GPCR_GEP_CNTL);	/* Let GPIO0 output */
-	iow(db, DM9000_GPR, 0);	/* Enable PHY */
 
 	ncr = (db->flags & DM9000_PLATF_EXT_PHY) ? NCR_EXT_PHY : 0;
 
@@ -852,8 +818,8 @@ static void dm9000_timeout(struct net_device *dev)
 	unsigned long flags;
 
 	/* Save previous register address */
-	reg_save = readb(db->io_addr);
 	spin_lock_irqsave(&db->lock, flags);
+	reg_save = readb(db->io_addr);
 
 	netif_stop_queue(dev);
 	dm9000_reset(db);
@@ -906,7 +872,7 @@ dm9000_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		return NETDEV_TX_BUSY;
 
 	spin_lock_irqsave(&db->lock, flags);
-
+	
 	/* Move data to DM9000 TX RAM */
 	writeb(DM9000_MWCMD, db->io_addr);
 
@@ -925,7 +891,7 @@ dm9000_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	spin_unlock_irqrestore(&db->lock, flags);
-
+	
 	/* free this SKB */
 	dev_kfree_skb(skb);
 
@@ -961,7 +927,7 @@ struct dm9000_rxhdr {
 	u8	RxPktReady;
 	u8	RxStatus;
 	__le16	RxLen;
-} __attribute__((__packed__));
+} __packed;
 
 /*
  *  Received a packet and pass to upper layer
@@ -980,20 +946,30 @@ dm9000_rx(struct net_device *dev)
 	do {
 		ior(db, DM9000_MRCMDX);	/* Dummy read */
 
-		/* Get most updated data */
-		rxbyte = readb(db->io_data);
+		udelay(1);//add by lyx@20100713,or dm9000_rx will be error in high frequence
 
+		#if 1
+		/* Get most updated data */		
+		rxbyte = ior(db, DM9000_MRCMDX);	/* Dummy read */
+		#else
+		rxbyte = readb(db->io_data);
+		#endif
+		
 		/* Status check: this byte must be 0 or 1 */
 		if (rxbyte & DM9000_PKT_ERR) {
 			dev_warn(db->dev, "status check fail: %d\n", rxbyte);
+			#if 0
 			iow(db, DM9000_RCR, 0x00);	/* Stop Device */
 			iow(db, DM9000_ISR, IMR_PAR);	/* Stop INT request */
+			#else
+			dm9000_reset(db);
+			#endif			
 			return;
 		}
 
 		if (!(rxbyte & DM9000_PKT_RDY))
 			return;
-
+		
 		/* A packet ready now  & Get status/length */
 		GoodPacket = true;
 		writeb(DM9000_MRCMD, db->io_addr);
@@ -1052,11 +1028,11 @@ dm9000_rx(struct net_device *dev)
 
 			/* Pass to upper layer */
 			skb->protocol = eth_type_trans(skb, dev);
-			if (db->rx_csum) {
+			if (dev->features & NETIF_F_RXCSUM) {
 				if ((((rxbyte & 0x1c) << 3) & rxbyte) == 0)
 					skb->ip_summed = CHECKSUM_UNNECESSARY;
 				else
-					skb->ip_summed = CHECKSUM_NONE;
+					skb_checksum_none_assert(skb);
 			}
 			netif_rx(skb);
 			dev->stats.rx_packets++;
@@ -1081,7 +1057,7 @@ static irqreturn_t dm9000_interrupt(int irq, void *dev_id)
 
 	/* A real interrupt coming */
 
-	/* holders of db->lock must always block IRQs */
+	/* holders of db->lock must always block IRQs */	
 	spin_lock_irqsave(&db->lock, flags);
 
 	/* Save previous register address */
@@ -1119,7 +1095,7 @@ static irqreturn_t dm9000_interrupt(int irq, void *dev_id)
 	writeb(reg_save, db->io_addr);
 
 	spin_unlock_irqrestore(&db->lock, flags);
-
+	
 	return IRQ_HANDLED;
 }
 
@@ -1189,14 +1165,18 @@ dm9000_open(struct net_device *dev)
 	if (irqflags == IRQF_TRIGGER_NONE)
 		dev_warn(db->dev, "WARNING: no IRQ resource flags set.\n");
 
-	irqflags |= IRQF_SHARED;
+	//irqflags |= IRQF_SHARED;
 
-	if (request_irq(dev->irq, dm9000_interrupt, irqflags, dev->name, dev))
-		return -EAGAIN;
+	/* GPIO0 on pre-activate PHY, Reg 1F is not set by reset */
+	iow(db, DM9000_GPR, 0);	/* REG_1F bit0 activate phyxcer */
+	mdelay(1); /* delay needs by DM9000B */
 
 	/* Initialize DM9000 board */
 	dm9000_reset(db);
 	dm9000_init_dm9000(dev);
+
+	if (request_irq(dev->irq, dm9000_interrupt, irqflags, dev->name, dev))
+		return -EAGAIN;
 
 	/* Init driver variable */
 	db->dbug_cnt = 0;
@@ -1235,7 +1215,7 @@ dm9000_phy_read(struct net_device *dev, int phy_reg_unused, int reg)
 	mutex_lock(&db->addr_lock);
 
 	spin_lock_irqsave(&db->lock,flags);
-
+	
 	/* Save previous register address */
 	reg_save = readb(db->io_addr);
 
@@ -1282,7 +1262,7 @@ dm9000_phy_write(struct net_device *dev,
 	mutex_lock(&db->addr_lock);
 
 	spin_lock_irqsave(&db->lock,flags);
-
+	
 	/* Save previous register address */
 	reg_save = readb(db->io_addr);
 
@@ -1300,7 +1280,7 @@ dm9000_phy_write(struct net_device *dev,
 
 	dm9000_msleep(db, 1);		/* Wait write complete */
 
-	spin_lock_irqsave(&db->lock,flags);
+	spin_lock_irqsave(&db->lock,flags);	
 	reg_save = readb(db->io_addr);
 
 	iow(db, DM9000_EPCR, 0x0);	/* Clear phyxcer write command */
@@ -1357,6 +1337,7 @@ static const struct net_device_ops dm9000_netdev_ops = {
 	.ndo_set_multicast_list	= dm9000_hash_table,
 	.ndo_do_ioctl		= dm9000_ioctl,
 	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_features	= dm9000_set_features,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 #ifdef CONFIG_NET_POLL_CONTROLLER
@@ -1423,13 +1404,13 @@ dm9000_probe(struct platform_device *pdev)
 		} else {
 
 			/* test to see if irq is really wakeup capable */
-			ret = set_irq_wake(db->irq_wake, 1);
+			ret = irq_set_irq_wake(db->irq_wake, 1);
 			if (ret) {
 				dev_err(db->dev, "irq %d cannot set wakeup (%d)\n",
 					db->irq_wake, ret);
 				ret = 0;
 			} else {
-				set_irq_wake(db->irq_wake, 0);
+				irq_set_irq_wake(db->irq_wake, 0);
 				db->wake_supported = 1;
 			}
 		}
@@ -1473,8 +1454,29 @@ dm9000_probe(struct platform_device *pdev)
 
 	/* fill in parameters for net-dev structure */
 	ndev->base_addr = (unsigned long)db->io_addr;
-	ndev->irq	= db->irq_res->start;
 
+	//io init for dm9000 , modify by lyx@20100809
+	if (pdata && pdata->io_init) {
+		if (pdata->io_init()) {
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+	if (gpio_request(pdata->irq_pin, "dm9000 interrupt")) {
+		gpio_free(pdata->irq_pin);
+		if (pdata->io_deinit)
+			pdata->io_deinit();
+		printk("[fun:%s line:%d], request gpio for net interrupt fail\n", __func__,__LINE__);
+		ret = -EINVAL;
+		goto out;
+	}	
+	gpio_pull_updown(pdata->irq_pin, pdata->irq_pin_value);
+	gpio_direction_input(pdata->irq_pin);
+
+	ndev->irq = gpio_to_irq(pdata->irq_pin);
+	//ndev->irq = db->irq_res->start;
+	
 	/* ensure at least we have a default set of IO routines */
 	dm9000_set_io(db, iosize);
 
@@ -1550,9 +1552,8 @@ dm9000_probe(struct platform_device *pdev)
 
 	/* dm9000a/b are capable of hardware checksum offload */
 	if (db->type == TYPE_DM9000A || db->type == TYPE_DM9000B) {
-		db->can_csum = 1;
-		db->rx_csum = 1;
-		ndev->features |= NETIF_F_IP_CSUM;
+		ndev->hw_features = NETIF_F_RXCSUM | NETIF_F_IP_CSUM;
+		ndev->features |= ndev->hw_features;
 	}
 
 	/* from this point we assume that we have found a DM9000 */
@@ -1592,9 +1593,14 @@ dm9000_probe(struct platform_device *pdev)
 			ndev->dev_addr[i] = ior(db, i+DM9000_PAR);
 	}
 
-	if (!is_valid_ether_addr(ndev->dev_addr))
+	if (!is_valid_ether_addr(ndev->dev_addr)) {
 		dev_warn(db->dev, "%s: Invalid ethernet MAC address. Please "
 			 "set using ifconfig\n", ndev->name);
+
+		random_ether_addr(ndev->dev_addr);
+		mac_src = "random";
+	}
+
 
 	platform_set_drvdata(pdev, ndev);
 	ret = register_netdev(ndev);
@@ -1604,6 +1610,9 @@ dm9000_probe(struct platform_device *pdev)
 		       ndev->name, dm9000_type_to_char(db->type),
 		       db->io_addr, db->io_data, ndev->irq,
 		       ndev->dev_addr, mac_src);
+
+	dm9000_shutdown(ndev);//add by lyx@20100713, reduce power consume
+
 	return 0;
 
 out:
@@ -1671,11 +1680,17 @@ static int __devexit
 dm9000_drv_remove(struct platform_device *pdev)
 {
 	struct net_device *ndev = platform_get_drvdata(pdev);
+	struct dm9000_plat_data *pdata = pdev->dev.platform_data;
+
+	//deinit io for dm9000
+	gpio_free(pdata->irq_pin);
+	if (pdata && pdata->io_deinit)
+		pdata->io_deinit();
 
 	platform_set_drvdata(pdev, NULL);
 
 	unregister_netdev(ndev);
-	dm9000_release_board(pdev, (board_info_t *) netdev_priv(ndev));
+	dm9000_release_board(pdev, netdev_priv(ndev));
 	free_netdev(ndev);		/* free device structure */
 
 	dev_dbg(&pdev->dev, "released and freed device\n");

@@ -131,7 +131,12 @@ register_slot(acpi_handle handle, u32 lvl, void *context, void **rv)
 	if (!acpi_pci_check_ejectable(pbus, handle) && !is_dock_device(handle))
 		return AE_OK;
 
-	acpi_evaluate_integer(handle, "_ADR", NULL, &adr);
+	status = acpi_evaluate_integer(handle, "_ADR", NULL, &adr);
+	if (ACPI_FAILURE(status)) {
+		warn("can't evaluate _ADR (%#x)\n", status);
+		return AE_OK;
+	}
+
 	device = (adr >> 16) & 0xffff;
 	function = adr & 0xffff;
 
@@ -212,6 +217,7 @@ register_slot(acpi_handle handle, u32 lvl, void *context, void **rv)
 
 	pdev = pci_get_slot(pbus, PCI_DEVFN(device, function));
 	if (pdev) {
+		pdev->current_state = PCI_D0;
 		slot->flags |= (SLOT_ENABLED | SLOT_POWEREDON);
 		pci_dev_put(pdev);
 	}
@@ -584,7 +590,7 @@ static void remove_bridge(acpi_handle handle)
 
 	/*
 	 * On root bridges with hotplug slots directly underneath (ie,
-	 * no p2p bridge inbetween), we call cleanup_bridge(). 
+	 * no p2p bridge between), we call cleanup_bridge(). 
 	 *
 	 * The else clause cleans up root bridges that either had no
 	 * hotplug slots at all, or had a p2p bridge underneath.
@@ -826,6 +832,13 @@ static int __ref enable_device(struct acpiphp_slot *slot)
 	acpiphp_set_hpp_values(bus);
 	acpiphp_set_acpi_region(slot);
 	pci_enable_bridges(bus);
+
+	list_for_each_entry(dev, &bus->devices, bus_list) {
+		/* Assume that newly added devices are powered on already. */
+		if (!dev->is_added)
+			dev->current_state = PCI_D0;
+	}
+
 	pci_bus_add_devices(bus);
 
 	list_for_each_entry(func, &slot->funcs, sibling) {

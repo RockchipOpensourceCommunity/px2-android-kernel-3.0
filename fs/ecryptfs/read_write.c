@@ -39,20 +39,17 @@
 int ecryptfs_write_lower(struct inode *ecryptfs_inode, char *data,
 			 loff_t offset, size_t size)
 {
-	struct ecryptfs_inode_info *inode_info;
+	struct file *lower_file;
 	mm_segment_t fs_save;
 	ssize_t rc;
 
-	inode_info = ecryptfs_inode_to_private(ecryptfs_inode);
-	mutex_lock(&inode_info->lower_file_mutex);
-	BUG_ON(!inode_info->lower_file);
-	inode_info->lower_file->f_pos = offset;
+	lower_file = ecryptfs_inode_to_private(ecryptfs_inode)->lower_file;
+	if (!lower_file)
+		return -EIO;
 	fs_save = get_fs();
 	set_fs(get_ds());
-	rc = vfs_write(inode_info->lower_file, data, size,
-		       &inode_info->lower_file->f_pos);
+	rc = vfs_write(lower_file, data, size, &offset);
 	set_fs(fs_save);
-	mutex_unlock(&inode_info->lower_file_mutex);
 	mark_inode_dirty_sync(ecryptfs_inode);
 	return rc;
 }
@@ -133,13 +130,18 @@ int ecryptfs_write(struct inode *ecryptfs_inode, char *data, loff_t offset,
 		pgoff_t ecryptfs_page_idx = (pos >> PAGE_CACHE_SHIFT);
 		size_t start_offset_in_page = (pos & ~PAGE_CACHE_MASK);
 		size_t num_bytes = (PAGE_CACHE_SIZE - start_offset_in_page);
-		size_t total_remaining_bytes = ((offset + size) - pos);
+		loff_t total_remaining_bytes = ((offset + size) - pos);
+
+		if (fatal_signal_pending(current)) {
+			rc = -EINTR;
+			break;
+		}
 
 		if (num_bytes > total_remaining_bytes)
 			num_bytes = total_remaining_bytes;
 		if (pos < offset) {
 			/* remaining zeros to write, up to destination offset */
-			size_t total_remaining_zeros = (offset - pos);
+			loff_t total_remaining_zeros = (offset - pos);
 
 			if (num_bytes > total_remaining_zeros)
 				num_bytes = total_remaining_zeros;
@@ -196,15 +198,19 @@ int ecryptfs_write(struct inode *ecryptfs_inode, char *data, loff_t offset,
 		}
 		pos += num_bytes;
 	}
-	if ((offset + size) > ecryptfs_file_size) {
-		i_size_write(ecryptfs_inode, (offset + size));
+	if (pos > ecryptfs_file_size) {
+		i_size_write(ecryptfs_inode, pos);
 		if (crypt_stat->flags & ECRYPTFS_ENCRYPTED) {
-			rc = ecryptfs_write_inode_size_to_metadata(
+			int rc2;
+
+			rc2 = ecryptfs_write_inode_size_to_metadata(
 								ecryptfs_inode);
-			if (rc) {
+			if (rc2) {
 				printk(KERN_ERR	"Problem with "
 				       "ecryptfs_write_inode_size_to_metadata; "
-				       "rc = [%d]\n", rc);
+				       "rc = [%d]\n", rc2);
+				if (!rc)
+					rc = rc2;
 				goto out;
 			}
 		}
@@ -229,20 +235,17 @@ out:
 int ecryptfs_read_lower(char *data, loff_t offset, size_t size,
 			struct inode *ecryptfs_inode)
 {
-	struct ecryptfs_inode_info *inode_info =
-		ecryptfs_inode_to_private(ecryptfs_inode);
+	struct file *lower_file;
 	mm_segment_t fs_save;
 	ssize_t rc;
 
-	mutex_lock(&inode_info->lower_file_mutex);
-	BUG_ON(!inode_info->lower_file);
-	inode_info->lower_file->f_pos = offset;
+	lower_file = ecryptfs_inode_to_private(ecryptfs_inode)->lower_file;
+	if (!lower_file)
+		return -EIO;
 	fs_save = get_fs();
 	set_fs(get_ds());
-	rc = vfs_read(inode_info->lower_file, data, size,
-		      &inode_info->lower_file->f_pos);
+	rc = vfs_read(lower_file, data, size, &offset);
 	set_fs(fs_save);
-	mutex_unlock(&inode_info->lower_file_mutex);
 	return rc;
 }
 

@@ -30,22 +30,20 @@
 #include <linux/slab.h>
 #include <acpi/acpi_bus.h>
 #include <acpi/acpi_drivers.h>
+#include <asm/mwait.h>
 
 #define ACPI_PROCESSOR_AGGREGATOR_CLASS	"acpi_pad"
 #define ACPI_PROCESSOR_AGGREGATOR_DEVICE_NAME "Processor Aggregator"
 #define ACPI_PROCESSOR_AGGREGATOR_NOTIFY 0x80
 static DEFINE_MUTEX(isolated_cpus_lock);
+static DEFINE_MUTEX(round_robin_lock);
 
-#define MWAIT_SUBSTATE_MASK	(0xf)
-#define MWAIT_CSTATE_MASK	(0xf)
-#define MWAIT_SUBSTATE_SIZE	(4)
-#define CPUID_MWAIT_LEAF (5)
-#define CPUID5_ECX_EXTENSIONS_SUPPORTED (0x1)
-#define CPUID5_ECX_INTERRUPT_BREAK	(0x2)
 static unsigned long power_saving_mwait_eax;
 
 static unsigned char tsc_detected_unstable;
 static unsigned char tsc_marked_unstable;
+static unsigned char lapic_detected_unstable;
+static unsigned char lapic_marked_unstable;
 
 static void power_saving_mwait_init(void)
 {
@@ -75,10 +73,7 @@ static void power_saving_mwait_init(void)
 	power_saving_mwait_eax = (highest_cstate << MWAIT_SUBSTATE_SIZE) |
 		(highest_subcstate - 1);
 
-	for_each_online_cpu(i)
-		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_ON, &i);
-
-#if defined(CONFIG_GENERIC_TIME) && defined(CONFIG_X86)
+#if defined(CONFIG_X86)
 	switch (boot_cpu_data.x86_vendor) {
 	case X86_VENDOR_AMD:
 	case X86_VENDOR_INTEL:
@@ -86,13 +81,15 @@ static void power_saving_mwait_init(void)
 		 * AMD Fam10h TSC will tick in all
 		 * C/P/S0/S1 states when this bit is set.
 		 */
-		if (boot_cpu_has(X86_FEATURE_NONSTOP_TSC))
-			return;
-
-		/*FALL THROUGH*/
+		if (!boot_cpu_has(X86_FEATURE_NONSTOP_TSC))
+			tsc_detected_unstable = 1;
+		if (!boot_cpu_has(X86_FEATURE_ARAT))
+			lapic_detected_unstable = 1;
+		break;
 	default:
-		/* TSC could halt in idle */
+		/* TSC & LAPIC could halt in idle */
 		tsc_detected_unstable = 1;
+		lapic_detected_unstable = 1;
 	}
 #endif
 }
@@ -111,7 +108,7 @@ static void round_robin_cpu(unsigned int tsk_index)
 	if (!alloc_cpumask_var(&tmp, GFP_KERNEL))
 		return;
 
-	mutex_lock(&isolated_cpus_lock);
+	mutex_lock(&round_robin_lock);
 	cpumask_clear(tmp);
 	for_each_cpu(cpu, pad_busy_cpus)
 		cpumask_or(tmp, tmp, topology_thread_cpumask(cpu));
@@ -120,7 +117,7 @@ static void round_robin_cpu(unsigned int tsk_index)
 	if (cpumask_empty(tmp))
 		cpumask_andnot(tmp, cpu_online_mask, pad_busy_cpus);
 	if (cpumask_empty(tmp)) {
-		mutex_unlock(&isolated_cpus_lock);
+		mutex_unlock(&round_robin_lock);
 		return;
 	}
 	for_each_cpu(cpu, tmp) {
@@ -135,7 +132,7 @@ static void round_robin_cpu(unsigned int tsk_index)
 	tsk_in_cpu[tsk_index] = preferred_cpu;
 	cpumask_set_cpu(preferred_cpu, pad_busy_cpus);
 	cpu_weight[preferred_cpu]++;
-	mutex_unlock(&isolated_cpus_lock);
+	mutex_unlock(&round_robin_lock);
 
 	set_cpus_allowed_ptr(current, cpumask_of(preferred_cpu));
 }
@@ -180,10 +177,20 @@ static int power_saving_thread(void *data)
 				mark_tsc_unstable("TSC halts in idle");
 				tsc_marked_unstable = 1;
 			}
+			if (lapic_detected_unstable && !lapic_marked_unstable) {
+				int i;
+				/* LAPIC could halt in idle, so notify users */
+				for_each_online_cpu(i)
+					clockevents_notify(
+						CLOCK_EVT_NOTIFY_BROADCAST_ON,
+						&i);
+				lapic_marked_unstable = 1;
+			}
 			local_irq_disable();
 			cpu = smp_processor_id();
-			clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_ENTER,
-				&cpu);
+			if (lapic_marked_unstable)
+				clockevents_notify(
+					CLOCK_EVT_NOTIFY_BROADCAST_ENTER, &cpu);
 			stop_critical_timings();
 
 			__monitor((void *)&current_thread_info()->flags, 0, 0);
@@ -192,8 +199,9 @@ static int power_saving_thread(void *data)
 				__mwait(power_saving_mwait_eax, 1);
 
 			start_critical_timings();
-			clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_EXIT,
-				&cpu);
+			if (lapic_marked_unstable)
+				clockevents_notify(
+					CLOCK_EVT_NOTIFY_BROADCAST_EXIT, &cpu);
 			local_irq_enable();
 
 			if (jiffies > expire_time) {
@@ -291,7 +299,7 @@ static ssize_t acpi_pad_rrtime_store(struct device *dev,
 static ssize_t acpi_pad_rrtime_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
-	return scnprintf(buf, PAGE_SIZE, "%d", round_robin_time);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", round_robin_time);
 }
 static DEVICE_ATTR(rrtime, S_IRUGO|S_IWUSR,
 	acpi_pad_rrtime_show,
@@ -314,7 +322,7 @@ static ssize_t acpi_pad_idlepct_store(struct device *dev,
 static ssize_t acpi_pad_idlepct_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
-	return scnprintf(buf, PAGE_SIZE, "%d", idle_pct);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", idle_pct);
 }
 static DEVICE_ATTR(idlepct, S_IRUGO|S_IWUSR,
 	acpi_pad_idlepct_show,
@@ -335,8 +343,11 @@ static ssize_t acpi_pad_idlecpus_store(struct device *dev,
 static ssize_t acpi_pad_idlecpus_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
-	return cpumask_scnprintf(buf, PAGE_SIZE,
-		to_cpumask(pad_busy_cpus_bits));
+	int n = 0;
+	n = cpumask_scnprintf(buf, PAGE_SIZE-2, to_cpumask(pad_busy_cpus_bits));
+	buf[n++] = '\n';
+	buf[n] = '\0';
+	return n;
 }
 static DEVICE_ATTR(idlecpus, S_IRUGO|S_IWUSR,
 	acpi_pad_idlecpus_show,
@@ -370,31 +381,32 @@ static void acpi_pad_remove_sysfs(struct acpi_device *device)
 	device_remove_file(&device->dev, &dev_attr_rrtime);
 }
 
-/* Query firmware how many CPUs should be idle */
-static int acpi_pad_pur(acpi_handle handle, int *num_cpus)
+/*
+ * Query firmware how many CPUs should be idle
+ * return -1 on failure
+ */
+static int acpi_pad_pur(acpi_handle handle)
 {
 	struct acpi_buffer buffer = {ACPI_ALLOCATE_BUFFER, NULL};
 	union acpi_object *package;
-	int rev, num, ret = -EINVAL;
+	int num = -1;
 
 	if (ACPI_FAILURE(acpi_evaluate_object(handle, "_PUR", NULL, &buffer)))
-		return -EINVAL;
+		return num;
 
 	if (!buffer.length || !buffer.pointer)
-		return -EINVAL;
+		return num;
 
 	package = buffer.pointer;
-	if (package->type != ACPI_TYPE_PACKAGE || package->package.count != 2)
-		goto out;
-	rev = package->package.elements[0].integer.value;
-	num = package->package.elements[1].integer.value;
-	if (rev != 1 || num < 0)
-		goto out;
-	*num_cpus = num;
-	ret = 0;
-out:
+
+	if (package->type == ACPI_TYPE_PACKAGE &&
+		package->package.count == 2 &&
+		package->package.elements[0].integer.value == 1) /* rev 1 */
+
+		num = package->package.elements[1].integer.value;
+
 	kfree(buffer.pointer);
-	return ret;
+	return num;
 }
 
 /* Notify firmware how many CPUs are idle */
@@ -421,7 +433,8 @@ static void acpi_pad_handle_notify(acpi_handle handle)
 	uint32_t idle_cpus;
 
 	mutex_lock(&isolated_cpus_lock);
-	if (acpi_pad_pur(handle, &num_cpus)) {
+	num_cpus = acpi_pad_pur(handle);
+	if (num_cpus < 0) {
 		mutex_unlock(&isolated_cpus_lock);
 		return;
 	}
@@ -444,7 +457,7 @@ static void acpi_pad_notify(acpi_handle handle, u32 event,
 			dev_name(&device->dev), event, 0);
 		break;
 	default:
-		printk(KERN_WARNING"Unsupported event [0x%x]\n", event);
+		printk(KERN_WARNING "Unsupported event [0x%x]\n", event);
 		break;
 	}
 }

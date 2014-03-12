@@ -252,8 +252,8 @@ int ubifs_find_dirty_leb(struct ubifs_info *c, struct ubifs_lprops *ret_lp,
 		 * But if the index takes fewer LEBs than it is reserved for it,
 		 * this function must avoid picking those reserved LEBs.
 		 */
-		if (c->min_idx_lebs >= c->lst.idx_lebs) {
-			rsvd_idx_lebs = c->min_idx_lebs -  c->lst.idx_lebs;
+		if (c->bi.min_idx_lebs >= c->lst.idx_lebs) {
+			rsvd_idx_lebs = c->bi.min_idx_lebs -  c->lst.idx_lebs;
 			exclude_index = 1;
 		}
 		spin_unlock(&c->space_lock);
@@ -276,7 +276,7 @@ int ubifs_find_dirty_leb(struct ubifs_info *c, struct ubifs_lprops *ret_lp,
 			pick_free = 0;
 	} else {
 		spin_lock(&c->space_lock);
-		exclude_index = (c->min_idx_lebs >= c->lst.idx_lebs);
+		exclude_index = (c->bi.min_idx_lebs >= c->lst.idx_lebs);
 		spin_unlock(&c->space_lock);
 	}
 
@@ -501,8 +501,8 @@ int ubifs_find_free_space(struct ubifs_info *c, int min_space, int *offs,
 
 	/* Check if there are enough empty LEBs for commit */
 	spin_lock(&c->space_lock);
-	if (c->min_idx_lebs > c->lst.idx_lebs)
-		rsvd_idx_lebs = c->min_idx_lebs -  c->lst.idx_lebs;
+	if (c->bi.min_idx_lebs > c->lst.idx_lebs)
+		rsvd_idx_lebs = c->bi.min_idx_lebs -  c->lst.idx_lebs;
 	else
 		rsvd_idx_lebs = 0;
 	lebs = c->lst.empty_lebs + c->freeable_cnt + c->idx_gc_cnt -
@@ -681,8 +681,16 @@ int ubifs_find_free_leb_for_idx(struct ubifs_info *c)
 	if (!lprops) {
 		lprops = ubifs_fast_find_freeable(c);
 		if (!lprops) {
-			ubifs_assert(c->freeable_cnt == 0);
-			if (c->lst.empty_lebs - c->lst.taken_empty_lebs > 0) {
+			/*
+			 * The first condition means the following: go scan the
+			 * LPT if there are uncategorized lprops, which means
+			 * there may be freeable LEBs there (UBIFS does not
+			 * store the information about freeable LEBs in the
+			 * master node).
+			 */
+			if (c->in_a_category_cnt != c->main_lebs ||
+			    c->lst.empty_lebs - c->lst.taken_empty_lebs > 0) {
+				ubifs_assert(c->freeable_cnt == 0);
 				lprops = scan_for_leb_for_idx(c);
 				if (IS_ERR(lprops)) {
 					err = PTR_ERR(lprops);

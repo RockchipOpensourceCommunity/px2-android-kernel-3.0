@@ -246,8 +246,6 @@ static void omninet_read_bulk_callback(struct urb *urb)
 		dev_err(&port->dev,
 			"%s - failed resubmitting read urb, error %d\n",
 			__func__, result);
-
-	return;
 }
 
 static int omninet_write(struct tty_struct *tty, struct usb_serial_port *port,
@@ -317,7 +315,7 @@ static int omninet_write_room(struct tty_struct *tty)
 	int room = 0; /* Default: no room */
 
 	/* FIXME: no consistent locking for write_urb_busy */
-	if (wport->write_urb_busy)
+	if (!wport->write_urb_busy)
 		room = wport->bulk_out_size - OMNINET_HEADERLEN;
 
 	dbg("%s - returns %d", __func__, room);

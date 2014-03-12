@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * 16 MiB NOR flash. The struct mtd_partition is not in the same order as the
- *     partitions on the device because we want to keep compatability with
+ *     partitions on the device because we want to keep compatibility with
  *     the QNAP firmware.
  * Layout as used by QNAP:
  *  0x00000000-0x00080000 : "U-Boot"
@@ -77,7 +77,7 @@ struct spi_board_info __initdata qnap_tsx1x_spi_slave_info[] = {
 	},
 };
 
-void qnap_tsx1x_register_flash(void)
+void __init qnap_tsx1x_register_flash(void)
 {
 	spi_register_board_info(qnap_tsx1x_spi_slave_info,
 				ARRAY_SIZE(qnap_tsx1x_spi_slave_info));

@@ -1,6 +1,24 @@
 /*
  * Parse RedBoot-style Flash Image System (FIS) tables and
  * produce a Linux partition array to match.
+ *
+ * Copyright © 2001      Red Hat UK Limited
+ * Copyright © 2001-2010 David Woodhouse <dwmw2@infradead.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
  */
 
 #include <linux/kernel.h>
@@ -278,6 +296,9 @@ static struct mtd_part_parser redboot_parser = {
 	.parse_fn = parse_redboot_partitions,
 	.name = "RedBoot",
 };
+
+/* mtd parsers will request the module by parser name */
+MODULE_ALIAS("RedBoot");
 
 static int __init redboot_parser_init(void)
 {

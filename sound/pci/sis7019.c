@@ -41,6 +41,7 @@ MODULE_SUPPORTED_DEVICE("{{SiS,SiS7019 Audio Accelerator}}");
 static int index = SNDRV_DEFAULT_IDX1;	/* Index 0-MAX */
 static char *id = SNDRV_DEFAULT_STR1;	/* ID for this card */
 static int enable = 1;
+static int codecs = 1;
 
 module_param(index, int, 0444);
 MODULE_PARM_DESC(index, "Index value for SiS7019 Audio Accelerator.");
@@ -48,6 +49,8 @@ module_param(id, charp, 0444);
 MODULE_PARM_DESC(id, "ID string for SiS7019 Audio Accelerator.");
 module_param(enable, bool, 0444);
 MODULE_PARM_DESC(enable, "Enable SiS7019 Audio Accelerator.");
+module_param(codecs, int, 0444);
+MODULE_PARM_DESC(codecs, "Set bit to indicate that codec number is expected to be present (default 1)");
 
 static DEFINE_PCI_DEVICE_TABLE(snd_sis7019_ids) = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_SI, 0x7019) },
@@ -140,6 +143,9 @@ struct sis7019 {
 	dma_addr_t silence_dma_addr;
 };
 
+/* These values are also used by the module param 'codecs' to indicate
+ * which codecs should be present.
+ */
 #define SIS_PRIMARY_CODEC_PRESENT	0x0001
 #define SIS_SECONDARY_CODEC_PRESENT	0x0002
 #define SIS_TERTIARY_CODEC_PRESENT	0x0004
@@ -264,11 +270,13 @@ static void sis_update_voice(struct voice *voice)
 		 * if using small periods.
 		 *
 		 * If we're less than 9 samples behind, we're on target.
+		 * Otherwise, shorten the next vperiod by the amount we've
+		 * been delayed.
 		 */
 		if (sync > -9)
 			voice->vperiod = voice->sync_period_size + 1;
 		else
-			voice->vperiod = voice->sync_period_size - 4;
+			voice->vperiod = voice->sync_period_size + sync + 10;
 
 		if (voice->vperiod < voice->buffer_size) {
 			sis_update_sso(voice, voice->vperiod);
@@ -306,7 +314,7 @@ static irqreturn_t sis_interrupt(int irq, void *dev)
 	u32 intr, status;
 
 	/* We only use the DMA interrupts, and we don't enable any other
-	 * source of interrupts. But, it is possible to see an interupt
+	 * source of interrupts. But, it is possible to see an interrupt
 	 * status that didn't actually interrupt us, so eliminate anything
 	 * we're not expecting to avoid falsely claiming an IRQ, and an
 	 * ensuing endless loop.
@@ -736,7 +744,7 @@ static void sis_prepare_timing_voice(struct voice *voice,
 	period_size = buffer_size;
 
 	/* Initially, we want to interrupt just a bit behind the end of
-	 * the period we're clocking out. 10 samples seems to give a good
+	 * the period we're clocking out. 12 samples seems to give a good
 	 * delay.
 	 *
 	 * We want to spread our interrupts throughout the virtual period,
@@ -747,7 +755,7 @@ static void sis_prepare_timing_voice(struct voice *voice,
 	 *
 	 * This is all moot if we don't need to use virtual periods.
 	 */
-	vperiod = runtime->period_size + 10;
+	vperiod = runtime->period_size + 12;
 	if (vperiod > period_size) {
 		u16 tail = vperiod % period_size;
 		u16 quarter_period = period_size / 4;
@@ -771,12 +779,12 @@ static void sis_prepare_timing_voice(struct voice *voice,
 		vperiod = 0;
 	}
 
-	/* The interrupt handler implements the timing syncronization, so
+	/* The interrupt handler implements the timing synchronization, so
 	 * setup its state.
 	 */
 	timing->flags |= VOICE_SYNC_TIMING;
 	timing->sync_base = voice->ctrl_base;
-	timing->sync_cso = runtime->period_size - 1;
+	timing->sync_cso = runtime->period_size;
 	timing->sync_period_size = runtime->period_size;
 	timing->sync_buffer_size = runtime->buffer_size;
 	timing->period_size = period_size;
@@ -1047,7 +1055,7 @@ static int sis_chip_free(struct sis7019 *sis)
 	/* Reset the chip, and disable all interrputs.
 	 */
 	outl(SIS_GCR_SOFTWARE_RESET, sis->ioport + SIS_GCR);
-	udelay(10);
+	udelay(25);
 	outl(0, sis->ioport + SIS_GCR);
 	outl(0, sis->ioport + SIS_GIER);
 
@@ -1076,6 +1084,7 @@ static int sis_chip_init(struct sis7019 *sis)
 {
 	unsigned long io = sis->ioport;
 	void __iomem *ioaddr = sis->ioaddr;
+	unsigned long timeout;
 	u16 status;
 	int count;
 	int i;
@@ -1083,7 +1092,7 @@ static int sis_chip_init(struct sis7019 *sis)
 	/* Reset the audio controller
 	 */
 	outl(SIS_GCR_SOFTWARE_RESET, io + SIS_GCR);
-	udelay(10);
+	udelay(25);
 	outl(0, io + SIS_GCR);
 
 	/* Get the AC-link semaphore, and reset the codecs
@@ -1096,27 +1105,51 @@ static int sis_chip_init(struct sis7019 *sis)
 		return -EIO;
 
 	outl(SIS_AC97_CMD_CODEC_COLD_RESET, io + SIS_AC97_CMD);
-	udelay(10);
+	udelay(250);
 
 	count = 0xffff;
 	while ((inw(io + SIS_AC97_STATUS) & SIS_AC97_STATUS_BUSY) && --count)
 		udelay(1);
 
-	/* Now that we've finished the reset, find out what's attached.
-	 */
-	status = inl(io + SIS_AC97_STATUS);
-	if (status & SIS_AC97_STATUS_CODEC_READY)
-		sis->codecs_present |= SIS_PRIMARY_CODEC_PRESENT;
-	if (status & SIS_AC97_STATUS_CODEC2_READY)
-		sis->codecs_present |= SIS_SECONDARY_CODEC_PRESENT;
-	if (status & SIS_AC97_STATUS_CODEC3_READY)
-		sis->codecs_present |= SIS_TERTIARY_CODEC_PRESENT;
-
-	/* All done, let go of the semaphore, and check for errors
+	/* Command complete, we can let go of the semaphore now.
 	 */
 	outl(SIS_AC97_SEMA_RELEASE, io + SIS_AC97_SEMA);
-	if (!sis->codecs_present || !count)
+	if (!count)
 		return -EIO;
+
+	/* Now that we've finished the reset, find out what's attached.
+	 * There are some codec/board combinations that take an extremely
+	 * long time to come up. 350+ ms has been observed in the field,
+	 * so we'll give them up to 500ms.
+	 */
+	sis->codecs_present = 0;
+	timeout = msecs_to_jiffies(500) + jiffies;
+	while (time_before_eq(jiffies, timeout)) {
+		status = inl(io + SIS_AC97_STATUS);
+		if (status & SIS_AC97_STATUS_CODEC_READY)
+			sis->codecs_present |= SIS_PRIMARY_CODEC_PRESENT;
+		if (status & SIS_AC97_STATUS_CODEC2_READY)
+			sis->codecs_present |= SIS_SECONDARY_CODEC_PRESENT;
+		if (status & SIS_AC97_STATUS_CODEC3_READY)
+			sis->codecs_present |= SIS_TERTIARY_CODEC_PRESENT;
+
+		if (sis->codecs_present == codecs)
+			break;
+
+		msleep(1);
+	}
+
+	/* All done, check for errors.
+	 */
+	if (!sis->codecs_present) {
+		printk(KERN_ERR "sis7019: could not find any codecs\n");
+		return -EIO;
+	}
+
+	if (sis->codecs_present != codecs) {
+		printk(KERN_WARNING "sis7019: missing codecs, found %0x, expected %0x\n",
+		       sis->codecs_present, codecs);
+	}
 
 	/* Let the hardware know that the audio driver is alive,
 	 * and enable PCM slots on the AC-link for L/R playback (3 & 4) and
@@ -1137,7 +1170,7 @@ static int sis_chip_init(struct sis7019 *sis)
 	 */
 	outl(SIS_DMA_CSR_PCI_SETTINGS, io + SIS_DMA_CSR);
 
-	/* Reset the syncronization groups for all of the channels
+	/* Reset the synchronization groups for all of the channels
 	 * to be asyncronous. If we start doing SPDIF or 5.1 sound, etc.
 	 * we'll need to change how we handle these. Until then, we just
 	 * assign sub-mixer 0 to all playback channels, and avoid any
@@ -1387,6 +1420,17 @@ static int __devinit snd_sis7019_probe(struct pci_dev *pci,
 	rc = -ENOENT;
 	if (!enable)
 		goto error_out;
+
+	/* The user can specify which codecs should be present so that we
+	 * can wait for them to show up if they are slow to recover from
+	 * the AC97 cold reset. We default to a single codec, the primary.
+	 *
+	 * We assume that SIS_PRIMARY_*_PRESENT matches bits 0-2.
+	 */
+	codecs &= SIS_PRIMARY_CODEC_PRESENT | SIS_SECONDARY_CODEC_PRESENT |
+		  SIS_TERTIARY_CODEC_PRESENT;
+	if (!codecs)
+		codecs = SIS_PRIMARY_CODEC_PRESENT;
 
 	rc = snd_card_create(index, id, THIS_MODULE, sizeof(*sis), &card);
 	if (rc < 0)

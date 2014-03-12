@@ -213,10 +213,18 @@ static void parse_solaris_x86(struct parsed_partitions *state,
 		put_dev_sector(sect);
 		return;
 	}
-	printk(" %s%d: <solaris:", state->name, origin);
+	{
+		char tmp[1 + BDEVNAME_SIZE + 10 + 11 + 1];
+
+		snprintf(tmp, sizeof(tmp), " %s%d: <solaris:", state->name, origin);
+		strlcat(state->pp_buf, tmp, PAGE_SIZE);
+	}
 	if (le32_to_cpu(v->v_version) != 1) {
-		printk("  cannot handle version %d vtoc>\n",
-			le32_to_cpu(v->v_version));
+		char tmp[64];
+
+		snprintf(tmp, sizeof(tmp), "  cannot handle version %d vtoc>\n",
+			 le32_to_cpu(v->v_version));
+		strlcat(state->pp_buf, tmp, PAGE_SIZE);
 		put_dev_sector(sect);
 		return;
 	}
@@ -224,9 +232,12 @@ static void parse_solaris_x86(struct parsed_partitions *state,
 	max_nparts = le16_to_cpu (v->v_nparts) > 8 ? SOLARIS_X86_NUMSLICE : 8;
 	for (i=0; i<max_nparts && state->next<state->limit; i++) {
 		struct solaris_x86_slice *s = &v->v_slice[i];
+		char tmp[3 + 10 + 1 + 1];
+
 		if (s->s_size == 0)
 			continue;
-		printk(" [s%d]", i);
+		snprintf(tmp, sizeof(tmp), " [s%d]", i);
+		strlcat(state->pp_buf, tmp, PAGE_SIZE);
 		/* solaris partitions are relative to current MS-DOS
 		 * one; must add the offset of the current partition */
 		put_partition(state, state->next++,
@@ -234,7 +245,7 @@ static void parse_solaris_x86(struct parsed_partitions *state,
 				 le32_to_cpu(s->s_size));
 	}
 	put_dev_sector(sect);
-	printk(" >\n");
+	strlcat(state->pp_buf, " >\n", PAGE_SIZE);
 #endif
 }
 
@@ -250,6 +261,7 @@ static void parse_bsd(struct parsed_partitions *state,
 	Sector sect;
 	struct bsd_disklabel *l;
 	struct bsd_partition *p;
+	char tmp[64];
 
 	l = read_part_sector(state, offset + 1, &sect);
 	if (!l)
@@ -258,7 +270,9 @@ static void parse_bsd(struct parsed_partitions *state,
 		put_dev_sector(sect);
 		return;
 	}
-	printk(" %s%d: <%s:", state->name, origin, flavour);
+
+	snprintf(tmp, sizeof(tmp), " %s%d: <%s:", state->name, origin, flavour);
+	strlcat(state->pp_buf, tmp, PAGE_SIZE);
 
 	if (le16_to_cpu(l->d_npartitions) < max_partitions)
 		max_partitions = le16_to_cpu(l->d_npartitions);
@@ -275,16 +289,18 @@ static void parse_bsd(struct parsed_partitions *state,
 			/* full parent partition, we have it already */
 			continue;
 		if (offset > bsd_start || offset+size < bsd_start+bsd_size) {
-			printk("bad subpartition - ignored\n");
+			strlcat(state->pp_buf, "bad subpartition - ignored\n", PAGE_SIZE);
 			continue;
 		}
 		put_partition(state, state->next++, bsd_start, bsd_size);
 	}
 	put_dev_sector(sect);
-	if (le16_to_cpu(l->d_npartitions) > max_partitions)
-		printk(" (ignored %d more)",
-		       le16_to_cpu(l->d_npartitions) - max_partitions);
-	printk(" >\n");
+	if (le16_to_cpu(l->d_npartitions) > max_partitions) {
+		snprintf(tmp, sizeof(tmp), " (ignored %d more)",
+			 le16_to_cpu(l->d_npartitions) - max_partitions);
+		strlcat(state->pp_buf, tmp, PAGE_SIZE);
+	}
+	strlcat(state->pp_buf, " >\n", PAGE_SIZE);
 }
 #endif
 
@@ -333,7 +349,12 @@ static void parse_unixware(struct parsed_partitions *state,
 		put_dev_sector(sect);
 		return;
 	}
-	printk(" %s%d: <unixware:", state->name, origin);
+	{
+		char tmp[1 + BDEVNAME_SIZE + 10 + 12 + 1];
+
+		snprintf(tmp, sizeof(tmp), " %s%d: <unixware:", state->name, origin);
+		strlcat(state->pp_buf, tmp, PAGE_SIZE);
+	}
 	p = &l->vtoc.v_slice[1];
 	/* I omit the 0th slice as it is the same as whole disk. */
 	while (p - &l->vtoc.v_slice[0] < UNIXWARE_NUMSLICE) {
@@ -347,7 +368,7 @@ static void parse_unixware(struct parsed_partitions *state,
 		p++;
 	}
 	put_dev_sector(sect);
-	printk(" >\n");
+	strlcat(state->pp_buf, " >\n", PAGE_SIZE);
 #endif
 }
 
@@ -376,8 +397,10 @@ static void parse_minix(struct parsed_partitions *state,
 	 * the normal boot sector. */
 	if (msdos_magic_present (data + 510) &&
 	    SYS_IND(p) == MINIX_PARTITION) { /* subpartition table present */
+		char tmp[1 + BDEVNAME_SIZE + 10 + 9 + 1];
 
-		printk(" %s%d: <minix:", state->name, origin);
+		snprintf(tmp, sizeof(tmp), " %s%d: <minix:", state->name, origin);
+		strlcat(state->pp_buf, tmp, PAGE_SIZE);
 		for (i = 0; i < MINIX_NR_SUBPARTITIONS; i++, p++) {
 			if (state->next == state->limit)
 				break;
@@ -386,7 +409,7 @@ static void parse_minix(struct parsed_partitions *state,
 				put_partition(state, state->next++,
 					      start_sect(p), nr_sects(p));
 		}
-		printk(" >\n");
+		strlcat(state->pp_buf, " >\n", PAGE_SIZE);
 	}
 	put_dev_sector(sect);
 #endif /* CONFIG_MINIX_SUBPARTITION */
@@ -408,12 +431,20 @@ static struct {
  
 int msdos_partition(struct parsed_partitions *state)
 {
+#if defined(CONFIG_SDMMC_RK29) && !defined(CONFIG_SDMMC_RK29_OLD)
+	const struct block_device *bdev = state->bdev;
+#endif
 	sector_t sector_size = bdev_logical_block_size(state->bdev) / 512;
 	Sector sect;
 	unsigned char *data;
 	struct partition *p;
 	struct fat_boot_sector *fb;
 	int slot;
+#if defined(CONFIG_EMMC_RK)||defined(CONFIG_SDMMC2_RK29)
+	//if card is emmc(flag:2 is set in 'drivers/mmc/card/block.c'), return false
+	if(state->bdev->bd_disk->flags & 2)
+		return 0;
+#endif
 
 	data = read_part_sector(state, 0, &sect);
 	if (!data)
@@ -425,9 +456,16 @@ int msdos_partition(struct parsed_partitions *state)
 
 	if (aix_magic_present(state, data)) {
 		put_dev_sector(sect);
-		printk( " [AIX]");
+		strlcat(state->pp_buf, " [AIX]", PAGE_SIZE);
 		return 0;
 	}
+
+#if defined(CONFIG_SDMMC_RK29) && !defined(CONFIG_SDMMC_RK29_OLD) 
+    if(179 == MAJOR(bdev->bd_dev))
+    {
+	    printk(KERN_INFO "\n%s..%d... ==== Begin to parse sdcard-partition.  [mmc0]\n",__FUNCTION__, __LINE__);
+	}
+#endif
 
 	/*
 	 * Now that the 55aa signature is present, this is probably
@@ -438,6 +476,12 @@ int msdos_partition(struct parsed_partitions *state)
 	p = (struct partition *) (data + 0x1be);
 	for (slot = 1; slot <= 4; slot++, p++) {
 		if (p->boot_ind != 0 && p->boot_ind != 0x80) {
+#if defined(CONFIG_SDMMC_RK29) && !defined(CONFIG_SDMMC_RK29_OLD) 
+		    if(179 == MAJOR(bdev->bd_dev))
+		    {
+			    printk(KERN_INFO "%s..%d... ==== The sdcard has not MBR.  [mmc0]\n",__FUNCTION__, __LINE__);
+			}
+#endif
 			/*
 			 * Even without a valid boot inidicator value
 			 * its still possible this is valid FAT filesystem
@@ -446,11 +490,23 @@ int msdos_partition(struct parsed_partitions *state)
 			fb = (struct fat_boot_sector *) data;
 			if (slot == 1 && fb->reserved && fb->fats
 				&& fat_valid_media(fb->media)) {
-				printk("\n");
+				strlcat(state->pp_buf, "\n", PAGE_SIZE);
 				put_dev_sector(sect);
+#if defined(CONFIG_SDMMC_RK29) && !defined(CONFIG_SDMMC_RK29_OLD) 
+				if(179 == MAJOR(bdev->bd_dev))
+				{
+				    printk(KERN_INFO "%s..%d... ==== The DBR(slot=%d) is valid. [mmc0]\n",__FUNCTION__, __LINE__, slot);
+				}
+#endif
 				return 1;
 			} else {
 				put_dev_sector(sect);
+#if defined(CONFIG_SDMMC_RK29) && !defined(CONFIG_SDMMC_RK29_OLD) 
+				if(179 == MAJOR(bdev->bd_dev))
+				{
+				    printk(KERN_INFO "%s..%d... ==== The DBR is invalid. [mmc0]\n",__FUNCTION__, __LINE__);
+				}
+#endif
 				return 0;
 			}
 		}
@@ -473,13 +529,25 @@ int msdos_partition(struct parsed_partitions *state)
 	 * First find the primary and DOS-type extended partitions.
 	 * On the second pass look inside *BSD, Unixware and Solaris partitions.
 	 */
-
+#if defined(CONFIG_SDMMC_RK29) && !defined(CONFIG_SDMMC_RK29_OLD) 
+    if(179 == MAJOR(bdev->bd_dev))
+    {
+        printk(KERN_INFO "%s..%d... ==== The sdcard has MBR. [mmc0]\n", __FUNCTION__, __LINE__);
+    }
+#endif    
 	state->next = 5;
 	for (slot = 1 ; slot <= 4 ; slot++, p++) {
 		sector_t start = start_sect(p)*sector_size;
 		sector_t size = nr_sects(p)*sector_size;
 		if (!size)
 			continue;
+#if defined(CONFIG_SDMMC_RK29) && !defined(CONFIG_SDMMC_RK29_OLD) 
+	    if(179 == MAJOR(bdev->bd_dev))
+	    {
+		    printk(KERN_INFO "%s..%d... ==== partition-%d, size=%luKB  [mmc0]\n",\
+		        __FUNCTION__, __LINE__, slot, size/2);
+		}
+#endif	
 		if (is_extended_partition(p)) {
 			/*
 			 * prevent someone doing mkfs or mkswap on an
@@ -489,23 +557,35 @@ int msdos_partition(struct parsed_partitions *state)
 			 */
 			sector_t n = 2;
 			n = min(size, max(sector_size, n));
+#if defined(CONFIG_SDMMC_RK29) && !defined(CONFIG_SDMMC_RK29_OLD) 			
+            if(179 == MAJOR(bdev->bd_dev))
+            {
+			    printk(KERN_INFO "%s...%d... ==== extend partition-%d....[mmc0]\n",__FUNCTION__, __LINE__, slot);
+			}
+#endif			
 			put_partition(state, slot, start, n);
 
-			printk(" <");
+			strlcat(state->pp_buf, " <", PAGE_SIZE);
 			parse_extended(state, start, size);
-			printk(" >");
+			strlcat(state->pp_buf, " >", PAGE_SIZE);
 			continue;
 		}
+#if defined(CONFIG_SDMMC_RK29) && !defined(CONFIG_SDMMC_RK29_OLD) 
+		if(179 == MAJOR(bdev->bd_dev))
+		{
+		    printk(KERN_INFO "%s..%d... ==== main partition-%d....[mmc0]\n",__FUNCTION__, __LINE__, slot);
+		}
+#endif		
 		put_partition(state, slot, start, size);
 		if (SYS_IND(p) == LINUX_RAID_PARTITION)
 			state->parts[slot].flags = ADDPART_FLAG_RAID;
 		if (SYS_IND(p) == DM6_PARTITION)
-			printk("[DM]");
+			strlcat(state->pp_buf, "[DM]", PAGE_SIZE);
 		if (SYS_IND(p) == EZD_PARTITION)
-			printk("[EZD]");
+			strlcat(state->pp_buf, "[EZD]", PAGE_SIZE);
 	}
 
-	printk("\n");
+	strlcat(state->pp_buf, "\n", PAGE_SIZE);
 
 	/* second pass - output for each on a separate line */
 	p = (struct partition *) (0x1be + data);

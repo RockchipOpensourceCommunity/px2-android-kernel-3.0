@@ -13,6 +13,7 @@
 #include <linux/hugetlb.h>
 #include <linux/sched.h>
 #include <linux/ksm.h>
+#include <linux/file.h>
 
 /*
  * Any behaviour which results in changes to the vma->vm_flags needs to
@@ -68,6 +69,12 @@ static long madvise_behavior(struct vm_area_struct * vma,
 	case MADV_MERGEABLE:
 	case MADV_UNMERGEABLE:
 		error = ksm_madvise(vma, start, end, behavior, &new_flags);
+		if (error)
+			goto out;
+		break;
+	case MADV_HUGEPAGE:
+	case MADV_NOHUGEPAGE:
+		error = hugepage_madvise(vma, &new_flags, behavior);
 		if (error)
 			goto out;
 		break;
@@ -191,14 +198,16 @@ static long madvise_remove(struct vm_area_struct *vma,
 	struct address_space *mapping;
 	loff_t offset, endoff;
 	int error;
+	struct file *f;
 
 	*prev = NULL;	/* tell sys_madvise we drop mmap_sem */
 
 	if (vma->vm_flags & (VM_LOCKED|VM_NONLINEAR|VM_HUGETLB))
 		return -EINVAL;
 
-	if (!vma->vm_file || !vma->vm_file->f_mapping
-		|| !vma->vm_file->f_mapping->host) {
+	f = vma->vm_file;
+
+	if (!f || !f->f_mapping || !f->f_mapping->host) {
 			return -EINVAL;
 	}
 
@@ -212,9 +221,16 @@ static long madvise_remove(struct vm_area_struct *vma,
 	endoff = (loff_t)(end - vma->vm_start - 1)
 			+ ((loff_t)vma->vm_pgoff << PAGE_SHIFT);
 
-	/* vmtruncate_range needs to take i_mutex and i_alloc_sem */
+	/*
+	 * vmtruncate_range may need to take i_mutex and i_alloc_sem.
+	 * We need to explicitly grab a reference because the vma (and
+	 * hence the vma's reference to the file) can go away as soon as
+	 * we drop mmap_sem.
+	 */
+	get_file(f);
 	up_read(&current->mm->mmap_sem);
 	error = vmtruncate_range(mapping->host, offset, endoff);
+	fput(f);
 	down_read(&current->mm->mmap_sem);
 	return error;
 }
@@ -282,6 +298,10 @@ madvise_behavior_valid(int behavior)
 #ifdef CONFIG_KSM
 	case MADV_MERGEABLE:
 	case MADV_UNMERGEABLE:
+#endif
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	case MADV_HUGEPAGE:
+	case MADV_NOHUGEPAGE:
 #endif
 		return 1;
 

@@ -652,14 +652,14 @@ static inline int pte_special(pte_t pte)
 	 ((address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1)))
 #define pte_offset_kernel		pte_index
 #define pte_offset_map			pte_index
-#define pte_offset_map_nested		pte_index
 #define pte_unmap(pte)			do { } while (0)
-#define pte_unmap_nested(pte)		do { } while (0)
 
 /* Actual page table PTE updates.  */
-extern void tlb_batch_add(struct mm_struct *mm, unsigned long vaddr, pte_t *ptep, pte_t orig);
+extern void tlb_batch_add(struct mm_struct *mm, unsigned long vaddr,
+			  pte_t *ptep, pte_t orig, int fullmm);
 
-static inline void set_pte_at(struct mm_struct *mm, unsigned long addr, pte_t *ptep, pte_t pte)
+static inline void __set_pte_at(struct mm_struct *mm, unsigned long addr,
+			     pte_t *ptep, pte_t pte, int fullmm)
 {
 	pte_t orig = *ptep;
 
@@ -672,11 +672,18 @@ static inline void set_pte_at(struct mm_struct *mm, unsigned long addr, pte_t *p
 	 *             and SUN4V pte layout, so this inline test is fine.
 	 */
 	if (likely(mm != &init_mm) && (pte_val(orig) & _PAGE_VALID))
-		tlb_batch_add(mm, addr, ptep, orig);
+		tlb_batch_add(mm, addr, ptep, orig, fullmm);
 }
+
+#define set_pte_at(mm,addr,ptep,pte)	\
+	__set_pte_at((mm), (addr), (ptep), (pte), 0)
 
 #define pte_clear(mm,addr,ptep)		\
 	set_pte_at((mm), (addr), (ptep), __pte(0UL))
+
+#define __HAVE_ARCH_PTE_CLEAR_NOT_PRESENT_FULL
+#define pte_clear_not_present_full(mm,addr,ptep,fullmm)	\
+	__set_pte_at((mm), (addr), (ptep), __pte(0UL), (fullmm))
 
 #ifdef DCACHE_ALIASING_POSSIBLE
 #define __HAVE_ARCH_MOVE_PTE
@@ -700,6 +707,9 @@ extern pmd_t swapper_low_pmd_dir[2048];
 
 extern void paging_init(void);
 extern unsigned long find_ecache_flush_span(unsigned long size);
+
+struct seq_file;
+extern void mmu_info(struct seq_file *);
 
 /* These do nothing with the way I have things setup. */
 #define mmu_lockarea(vaddr, len)		(vaddr)
@@ -740,10 +750,6 @@ static inline bool kern_addr_valid(unsigned long addr)
 
 extern int page_in_phys_avail(unsigned long paddr);
 
-extern int io_remap_pfn_range(struct vm_area_struct *vma, unsigned long from,
-			       unsigned long pfn,
-			       unsigned long size, pgprot_t prot);
-
 /*
  * For sparc32&64, the pfn in io_remap_pfn_range() carries <iospace> in
  * its high 4 bits.  These macros/functions put it there or get it from there.
@@ -751,6 +757,22 @@ extern int io_remap_pfn_range(struct vm_area_struct *vma, unsigned long from,
 #define MK_IOSPACE_PFN(space, pfn)	(pfn | (space << (BITS_PER_LONG - 4)))
 #define GET_IOSPACE(pfn)		(pfn >> (BITS_PER_LONG - 4))
 #define GET_PFN(pfn)			(pfn & 0x0fffffffffffffffUL)
+
+extern int remap_pfn_range(struct vm_area_struct *, unsigned long, unsigned long,
+			   unsigned long, pgprot_t);
+
+static inline int io_remap_pfn_range(struct vm_area_struct *vma,
+				     unsigned long from, unsigned long pfn,
+				     unsigned long size, pgprot_t prot)
+{
+	unsigned long offset = GET_PFN(pfn) << PAGE_SHIFT;
+	int space = GET_IOSPACE(pfn);
+	unsigned long phys_base;
+
+	phys_base = offset | (((unsigned long) space) << 32UL);
+
+	return remap_pfn_range(vma, from, phys_base >> PAGE_SHIFT, size, prot);
+}
 
 #include <asm-generic/pgtable.h>
 

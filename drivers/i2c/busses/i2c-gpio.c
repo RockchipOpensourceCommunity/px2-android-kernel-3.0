@@ -88,7 +88,8 @@ static int __devinit i2c_gpio_probe(struct platform_device *pdev)
 	pdata = pdev->dev.platform_data;
 	if (!pdata)
 		return -ENXIO;
-
+	if(pdata->io_init)
+		pdata->io_init();
 	ret = -ENOMEM;
 	adap = kzalloc(sizeof(struct i2c_adapter), GFP_KERNEL);
 	if (!adap)
@@ -219,7 +220,7 @@ static void __exit i2c_gpio_exit(void)
 }
 module_exit(i2c_gpio_exit);
 
-MODULE_AUTHOR("Haavard Skinnemoen <hskinnemoen@atmel.com>");
+MODULE_AUTHOR("Haavard Skinnemoen (Atmel)");
 MODULE_DESCRIPTION("Platform-independent bitbanging I2C driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:i2c-gpio");

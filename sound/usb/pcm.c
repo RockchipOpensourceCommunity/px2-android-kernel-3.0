@@ -32,6 +32,7 @@
 #include "helper.h"
 #include "pcm.h"
 #include "clock.h"
+#include "power.h"
 
 /*
  * return the current pcm pointer.  just based on the hwptr_done value.
@@ -42,6 +43,8 @@ static snd_pcm_uframes_t snd_usb_pcm_pointer(struct snd_pcm_substream *substream
 	unsigned int hwptr_done;
 
 	subs = (struct snd_usb_substream *)substream->runtime->private_data;
+	if (subs->stream->chip->shutdown)
+		return SNDRV_PCM_POS_XRUN;
 	spin_lock(&subs->lock);
 	hwptr_done = subs->hwptr_done;
 	spin_unlock(&subs->lock);
@@ -173,13 +176,12 @@ int snd_usb_init_pitch(struct snd_usb_audio *chip, int iface,
 
 	switch (altsd->bInterfaceProtocol) {
 	case UAC_VERSION_1:
+	default:
 		return init_pitch_v1(chip, iface, alts, fmt);
 
 	case UAC_VERSION_2:
 		return init_pitch_v2(chip, iface, alts, fmt);
 	}
-
-	return -EINVAL;
 }
 
 /*
@@ -238,6 +240,7 @@ static int set_format(struct snd_usb_substream *subs, struct audioformat *fmt)
 	subs->datainterval = fmt->datainterval;
 	subs->syncpipe = subs->syncinterval = 0;
 	subs->maxpacksize = fmt->maxpacksize;
+	subs->syncmaxsize = 0;
 	subs->fill_max = 0;
 
 	/* we need a sync pipe in async OUT or adaptive IN mode */
@@ -284,6 +287,7 @@ static int set_format(struct snd_usb_substream *subs, struct audioformat *fmt)
 			subs->syncinterval = get_endpoint(alts, 1)->bInterval - 1;
 		else
 			subs->syncinterval = 3;
+		subs->syncmaxsize = le16_to_cpu(get_endpoint(alts, 1)->wMaxPacketSize);
 	}
 
 	/* always fill max packet size */
@@ -345,8 +349,14 @@ static int snd_usb_hw_params(struct snd_pcm_substream *substream,
 	changed = subs->cur_audiofmt != fmt ||
 		subs->period_bytes != params_period_bytes(hw_params) ||
 		subs->cur_rate != rate;
+
+	down_read(&subs->stream->chip->shutdown_rwsem);
+	if (subs->stream->chip->shutdown) {
+		ret = -ENODEV;
+		goto unlock;
+	}
 	if ((ret = set_format(subs, fmt)) < 0)
-		return ret;
+		goto unlock;
 
 	if (subs->cur_rate != rate) {
 		struct usb_host_interface *alts;
@@ -355,7 +365,7 @@ static int snd_usb_hw_params(struct snd_pcm_substream *substream,
 		alts = &iface->altsetting[fmt->altset_idx];
 		ret = snd_usb_init_sample_rate(subs->stream->chip, subs->interface, alts, fmt, rate);
 		if (ret < 0)
-			return ret;
+			goto unlock;
 		subs->cur_rate = rate;
 	}
 
@@ -369,6 +379,8 @@ static int snd_usb_hw_params(struct snd_pcm_substream *substream,
 							params_channels(hw_params));
 	}
 
+unlock:
+	up_read(&subs->stream->chip->shutdown_rwsem);
 	return ret;
 }
 
@@ -384,8 +396,9 @@ static int snd_usb_hw_free(struct snd_pcm_substream *substream)
 	subs->cur_audiofmt = NULL;
 	subs->cur_rate = 0;
 	subs->period_bytes = 0;
-	if (!subs->stream->chip->shutdown)
-		snd_usb_release_substream_urbs(subs, 0);
+	down_read(&subs->stream->chip->shutdown_rwsem);
+	snd_usb_release_substream_urbs(subs, 0);
+	up_read(&subs->stream->chip->shutdown_rwsem);
 	return snd_pcm_lib_free_vmalloc_buffer(substream);
 }
 
@@ -398,12 +411,18 @@ static int snd_usb_pcm_prepare(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct snd_usb_substream *subs = runtime->private_data;
+	int ret = 0;
 
 	if (! subs->cur_audiofmt) {
 		snd_printk(KERN_ERR "usbaudio: no format is specified!\n");
 		return -ENXIO;
 	}
 
+	down_read(&subs->stream->chip->shutdown_rwsem);
+	if (subs->stream->chip->shutdown) {
+		ret = -ENODEV;
+		goto unlock;
+	}
 	/* some unit conversions in runtime */
 	subs->maxframesize = bytes_to_frames(runtime, subs->maxpacksize);
 	subs->curframesize = bytes_to_frames(runtime, subs->curpacksize);
@@ -414,7 +433,10 @@ static int snd_usb_pcm_prepare(struct snd_pcm_substream *substream)
 	subs->phase = 0;
 	runtime->delay = 0;
 
-	return snd_usb_substream_prepare(subs, runtime);
+	ret = snd_usb_substream_prepare(subs, runtime);
+ unlock:
+	up_read(&subs->stream->chip->shutdown_rwsem);
+	return ret;
 }
 
 static struct snd_pcm_hardware snd_usb_hardware =
@@ -467,7 +489,7 @@ static int hw_check_valid_format(struct snd_usb_substream *subs,
 		return 0;
 	}
 	/* check whether the period time is >= the data packet interval */
-	if (snd_usb_get_speed(subs->dev) == USB_SPEED_HIGH) {
+	if (subs->speed != USB_SPEED_FULL) {
 		ptime = 125 * (1 << fp->datainterval);
 		if (ptime > pt->max || (ptime == pt->max && pt->openmax)) {
 			hwc_debug("   > check: ptime %u > max %u\n", ptime, pt->max);
@@ -636,7 +658,7 @@ static int hw_rule_period_time(struct snd_pcm_hw_params *params,
 		min_datainterval = min(min_datainterval, fp->datainterval);
 	}
 	if (min_datainterval == 0xff) {
-		hwc_debug("  --> get emtpy\n");
+		hwc_debug("  --> get empty\n");
 		it->empty = 1;
 		return -EINVAL;
 	}
@@ -665,6 +687,9 @@ static int snd_usb_pcm_check_knot(struct snd_pcm_runtime *runtime,
 	int count = 0, needs_knot = 0;
 	int err;
 
+	kfree(subs->rate_list.list);
+	subs->rate_list.list = NULL;
+
 	list_for_each_entry(fp, &subs->fmt_list, list) {
 		if (fp->rates & SNDRV_PCM_RATE_CONTINUOUS)
 			return 0;
@@ -675,8 +700,10 @@ static int snd_usb_pcm_check_knot(struct snd_pcm_runtime *runtime,
 	if (!needs_knot)
 		return 0;
 
-	subs->rate_list.count = count;
 	subs->rate_list.list = kmalloc(sizeof(int) * count, GFP_KERNEL);
+	if (!subs->rate_list.list)
+		return -ENOMEM;
+	subs->rate_list.count = count;
 	subs->rate_list.mask = 0;
 	count = 0;
 	list_for_each_entry(fp, &subs->fmt_list, list) {
@@ -733,9 +760,12 @@ static int setup_hw_info(struct snd_pcm_runtime *runtime, struct snd_usb_substre
 		pt = 125 * (1 << fp->datainterval);
 		ptmin = min(ptmin, pt);
 	}
+	err = snd_usb_autoresume(subs->stream->chip);
+	if (err < 0)
+		return err;
 
 	param_period_time_if_needed = SNDRV_PCM_HW_PARAM_PERIOD_TIME;
-	if (snd_usb_get_speed(subs->dev) != USB_SPEED_HIGH)
+	if (subs->speed == USB_SPEED_FULL)
 		/* full speed devices have fixed data packet interval */
 		ptmin = 1000;
 	if (ptmin == 1000)
@@ -750,21 +780,21 @@ static int setup_hw_info(struct snd_pcm_runtime *runtime, struct snd_usb_substre
 				       SNDRV_PCM_HW_PARAM_CHANNELS,
 				       param_period_time_if_needed,
 				       -1)) < 0)
-		return err;
+		goto rep_err;
 	if ((err = snd_pcm_hw_rule_add(runtime, 0, SNDRV_PCM_HW_PARAM_CHANNELS,
 				       hw_rule_channels, subs,
 				       SNDRV_PCM_HW_PARAM_FORMAT,
 				       SNDRV_PCM_HW_PARAM_RATE,
 				       param_period_time_if_needed,
 				       -1)) < 0)
-		return err;
+		goto rep_err;
 	if ((err = snd_pcm_hw_rule_add(runtime, 0, SNDRV_PCM_HW_PARAM_FORMAT,
 				       hw_rule_format, subs,
 				       SNDRV_PCM_HW_PARAM_RATE,
 				       SNDRV_PCM_HW_PARAM_CHANNELS,
 				       param_period_time_if_needed,
 				       -1)) < 0)
-		return err;
+		goto rep_err;
 	if (param_period_time_if_needed >= 0) {
 		err = snd_pcm_hw_rule_add(runtime, 0,
 					  SNDRV_PCM_HW_PARAM_PERIOD_TIME,
@@ -774,11 +804,15 @@ static int setup_hw_info(struct snd_pcm_runtime *runtime, struct snd_usb_substre
 					  SNDRV_PCM_HW_PARAM_RATE,
 					  -1);
 		if (err < 0)
-			return err;
+			goto rep_err;
 	}
 	if ((err = snd_usb_pcm_check_knot(runtime, subs)) < 0)
-		return err;
+		goto rep_err;
 	return 0;
+
+rep_err:
+	snd_usb_autosuspend(subs->stream->chip);
+	return err;
 }
 
 static int snd_usb_pcm_open(struct snd_pcm_substream *substream, int direction)
@@ -792,6 +826,7 @@ static int snd_usb_pcm_open(struct snd_pcm_substream *substream, int direction)
 	runtime->hw = snd_usb_hardware;
 	runtime->private_data = subs;
 	subs->pcm_substream = substream;
+	/* runtime PM is also done there */
 	return setup_hw_info(runtime, subs);
 }
 
@@ -805,6 +840,7 @@ static int snd_usb_pcm_close(struct snd_pcm_substream *substream, int direction)
 		subs->interface = -1;
 	}
 	subs->pcm_substream = NULL;
+	snd_usb_autosuspend(subs->stream->chip);
 	return 0;
 }
 

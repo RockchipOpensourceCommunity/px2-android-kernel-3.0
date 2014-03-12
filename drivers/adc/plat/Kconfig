@@ -1,0 +1,18 @@
+#
+# Adc hardware configuration
+#
+
+choice
+	prompt "ADC hardware drivers"
+	default ADC_RK29 if ARCH_RK29
+	default ADC_RKPX2 if ARCH_RKPX2 || ARCH_RK2928 || ARCH_RK3188
+
+config ADC_NULL
+	bool "NULL"
+
+config ADC_RKPX2
+	bool "RKPX2 adc interface"
+        depends on ARCH_RKPX2 || ARCH_RK2928 || ARCH_RK3188
+	help
+		This supports the use of the ADC interface on RKPX2 processors.
+endchoice

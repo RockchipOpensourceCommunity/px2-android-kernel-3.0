@@ -48,7 +48,6 @@
 #include <linux/stat.h>
 #include <linux/cdrom.h>
 #include <linux/nls.h>
-#include <linux/smp_lock.h>
 #include <linux/buffer_head.h>
 #include <linux/vfs.h>
 #include <linux/vmalloc.h>
@@ -57,6 +56,7 @@
 #include <linux/seq_file.h>
 #include <linux/bitmap.h>
 #include <linux/crc-itu-t.h>
+#include <linux/log2.h>
 #include <asm/byteorder.h>
 
 #include "udf_sb.h"
@@ -107,17 +107,16 @@ struct logicalVolIntegrityDescImpUse *udf_sb_lvidiu(struct udf_sb_info *sbi)
 }
 
 /* UDF filesystem type */
-static int udf_get_sb(struct file_system_type *fs_type,
-		      int flags, const char *dev_name, void *data,
-		      struct vfsmount *mnt)
+static struct dentry *udf_mount(struct file_system_type *fs_type,
+		      int flags, const char *dev_name, void *data)
 {
-	return get_sb_bdev(fs_type, flags, dev_name, data, udf_fill_super, mnt);
+	return mount_bdev(fs_type, flags, dev_name, data, udf_fill_super);
 }
 
 static struct file_system_type udf_fstype = {
 	.owner		= THIS_MODULE,
 	.name		= "udf",
-	.get_sb		= udf_get_sb,
+	.mount		= udf_mount,
 	.kill_sb	= kill_block_super,
 	.fs_flags	= FS_REQUIRES_DEV,
 };
@@ -136,13 +135,21 @@ static struct inode *udf_alloc_inode(struct super_block *sb)
 	ei->i_next_alloc_block = 0;
 	ei->i_next_alloc_goal = 0;
 	ei->i_strat4096 = 0;
+	init_rwsem(&ei->i_data_sem);
 
 	return &ei->vfs_inode;
 }
 
+static void udf_i_callback(struct rcu_head *head)
+{
+	struct inode *inode = container_of(head, struct inode, i_rcu);
+	INIT_LIST_HEAD(&inode->i_dentry);
+	kmem_cache_free(udf_inode_cachep, UDF_I(inode));
+}
+
 static void udf_destroy_inode(struct inode *inode)
 {
-	kmem_cache_free(udf_inode_cachep, UDF_I(inode));
+	call_rcu(&inode->i_rcu, udf_i_callback);
 }
 
 static void init_once(void *foo)
@@ -175,8 +182,7 @@ static const struct super_operations udf_sb_ops = {
 	.alloc_inode	= udf_alloc_inode,
 	.destroy_inode	= udf_destroy_inode,
 	.write_inode	= udf_write_inode,
-	.delete_inode	= udf_delete_inode,
-	.clear_inode	= udf_clear_inode,
+	.evict_inode	= udf_evict_inode,
 	.put_super	= udf_put_super,
 	.sync_fs	= udf_sync_fs,
 	.statfs		= udf_statfs,
@@ -569,13 +575,14 @@ static int udf_remount_fs(struct super_block *sb, int *flags, char *options)
 	if (!udf_parse_options(options, &uopt, true))
 		return -EINVAL;
 
-	lock_kernel();
+	write_lock(&sbi->s_cred_lock);
 	sbi->s_flags = uopt.flags;
 	sbi->s_uid   = uopt.uid;
 	sbi->s_gid   = uopt.gid;
 	sbi->s_umask = uopt.umask;
 	sbi->s_fmode = uopt.fmode;
 	sbi->s_dmode = uopt.dmode;
+	write_unlock(&sbi->s_cred_lock);
 
 	if (sbi->s_lvid_bh) {
 		int write_rev = le16_to_cpu(udf_sb_lvidiu(sbi)->minUDFWriteRev);
@@ -592,7 +599,6 @@ static int udf_remount_fs(struct super_block *sb, int *flags, char *options)
 		udf_open_lvid(sb);
 
 out_unlock:
-	unlock_kernel();
 	return error;
 }
 
@@ -961,9 +967,9 @@ static struct udf_bitmap *udf_sb_alloc_bitmap(struct super_block *sb, u32 index)
 		(sizeof(struct buffer_head *) * nr_groups);
 
 	if (size <= PAGE_SIZE)
-		bitmap = kmalloc(size, GFP_KERNEL);
+		bitmap = kzalloc(size, GFP_KERNEL);
 	else
-		bitmap = vmalloc(size); /* TODO: get rid of vmalloc */
+		bitmap = vzalloc(size); /* TODO: get rid of vzalloc */
 
 	if (bitmap == NULL) {
 		udf_error(sb, __func__,
@@ -972,7 +978,6 @@ static struct udf_bitmap *udf_sb_alloc_bitmap(struct super_block *sb, u32 index)
 		return NULL;
 	}
 
-	memset(bitmap, 0x00, size);
 	bitmap->s_block_bitmap = (struct buffer_head **)(bitmap + 1);
 	bitmap->s_nr_groups = nr_groups;
 	return bitmap;
@@ -1240,16 +1245,65 @@ out_bh:
 	return ret;
 }
 
+static int udf_load_sparable_map(struct super_block *sb,
+				 struct udf_part_map *map,
+				 struct sparablePartitionMap *spm)
+{
+	uint32_t loc;
+	uint16_t ident;
+	struct sparingTable *st;
+	struct udf_sparing_data *sdata = &map->s_type_specific.s_sparing;
+	int i;
+	struct buffer_head *bh;
+
+	map->s_partition_type = UDF_SPARABLE_MAP15;
+	sdata->s_packet_len = le16_to_cpu(spm->packetLength);
+	if (!is_power_of_2(sdata->s_packet_len)) {
+		udf_error(sb, __func__, "error loading logical volume descriptor: "
+			"Invalid packet length %u\n",
+			(unsigned)sdata->s_packet_len);
+		return -EIO;
+	}
+	if (spm->numSparingTables > 4) {
+		udf_error(sb, __func__, "error loading logical volume descriptor: "
+			"Too many sparing tables (%d)\n",
+			(int)spm->numSparingTables);
+		return -EIO;
+	}
+
+	for (i = 0; i < spm->numSparingTables; i++) {
+		loc = le32_to_cpu(spm->locSparingTable[i]);
+		bh = udf_read_tagged(sb, loc, loc, &ident);
+		if (!bh)
+			continue;
+
+		st = (struct sparingTable *)bh->b_data;
+		if (ident != 0 ||
+		    strncmp(st->sparingIdent.ident, UDF_ID_SPARING,
+			    strlen(UDF_ID_SPARING)) ||
+		    sizeof(*st) + le16_to_cpu(st->reallocationTableLen) >
+							sb->s_blocksize) {
+			brelse(bh);
+			continue;
+		}
+
+		sdata->s_spar_map[i] = bh;
+	}
+	map->s_partition_func = udf_get_pblock_spar15;
+	return 0;
+}
+
 static int udf_load_logicalvol(struct super_block *sb, sector_t block,
 			       struct kernel_lb_addr *fileset)
 {
 	struct logicalVolDesc *lvd;
-	int i, j, offset;
+	int i, offset;
 	uint8_t type;
 	struct udf_sb_info *sbi = UDF_SB(sb);
 	struct genericPartitionMap *gpm;
 	uint16_t ident;
 	struct buffer_head *bh;
+	unsigned int table_len;
 	int ret = 0;
 
 	bh = udf_read_tagged(sb, block, block, &ident);
@@ -1257,15 +1311,21 @@ static int udf_load_logicalvol(struct super_block *sb, sector_t block,
 		return 1;
 	BUG_ON(ident != TAG_IDENT_LVD);
 	lvd = (struct logicalVolDesc *)bh->b_data;
-
-	i = udf_sb_alloc_partition_maps(sb, le32_to_cpu(lvd->numPartitionMaps));
-	if (i != 0) {
-		ret = i;
+	table_len = le32_to_cpu(lvd->mapTableLength);
+	if (sizeof(*lvd) + table_len > sb->s_blocksize) {
+		udf_error(sb, __func__, "error loading logical volume descriptor: "
+			"Partition table too long (%u > %lu)\n", table_len,
+			sb->s_blocksize - sizeof(*lvd));
+		ret = 1;
 		goto out_bh;
 	}
 
+	ret = udf_sb_alloc_partition_maps(sb, le32_to_cpu(lvd->numPartitionMaps));
+	if (ret)
+		goto out_bh;
+
 	for (i = 0, offset = 0;
-	     i < sbi->s_partitions && offset < le32_to_cpu(lvd->mapTableLength);
+	     i < sbi->s_partitions && offset < table_len;
 	     i++, offset += gpm->partitionMapLength) {
 		struct udf_part_map *map = &sbi->s_partmaps[i];
 		gpm = (struct genericPartitionMap *)
@@ -1300,38 +1360,11 @@ static int udf_load_logicalvol(struct super_block *sb, sector_t block,
 			} else if (!strncmp(upm2->partIdent.ident,
 						UDF_ID_SPARABLE,
 						strlen(UDF_ID_SPARABLE))) {
-				uint32_t loc;
-				struct sparingTable *st;
-				struct sparablePartitionMap *spm =
-					(struct sparablePartitionMap *)gpm;
-
-				map->s_partition_type = UDF_SPARABLE_MAP15;
-				map->s_type_specific.s_sparing.s_packet_len =
-						le16_to_cpu(spm->packetLength);
-				for (j = 0; j < spm->numSparingTables; j++) {
-					struct buffer_head *bh2;
-
-					loc = le32_to_cpu(
-						spm->locSparingTable[j]);
-					bh2 = udf_read_tagged(sb, loc, loc,
-							     &ident);
-					map->s_type_specific.s_sparing.
-							s_spar_map[j] = bh2;
-
-					if (bh2 == NULL)
-						continue;
-
-					st = (struct sparingTable *)bh2->b_data;
-					if (ident != 0 || strncmp(
-						st->sparingIdent.ident,
-						UDF_ID_SPARING,
-						strlen(UDF_ID_SPARING))) {
-						brelse(bh2);
-						map->s_type_specific.s_sparing.
-							s_spar_map[j] = NULL;
-					}
+				if (udf_load_sparable_map(sb, map,
+				    (struct sparablePartitionMap *)gpm) < 0) {
+					ret = 1;
+					goto out_bh;
 				}
-				map->s_partition_func = udf_get_pblock_spar15;
 			} else if (!strncmp(upm2->partIdent.ident,
 						UDF_ID_METADATA,
 						strlen(UDF_ID_METADATA))) {
@@ -1579,9 +1612,7 @@ static int udf_load_sequence(struct super_block *sb, struct buffer_head *bh,
 {
 	struct anchorVolDescPtr *anchor;
 	long main_s, main_e, reserve_s, reserve_e;
-	struct udf_sb_info *sbi;
 
-	sbi = UDF_SB(sb);
 	anchor = (struct anchorVolDescPtr *)bh->b_data;
 
 	/* Locate the main sequence */
@@ -1778,6 +1809,8 @@ static void udf_open_lvid(struct super_block *sb)
 
 	if (!bh)
 		return;
+
+	mutex_lock(&sbi->s_alloc_mutex);
 	lvid = (struct logicalVolIntegrityDesc *)bh->b_data;
 	lvidiu = udf_sb_lvidiu(sbi);
 
@@ -1794,6 +1827,7 @@ static void udf_open_lvid(struct super_block *sb)
 	lvid->descTag.tagChecksum = udf_tag_checksum(&lvid->descTag);
 	mark_buffer_dirty(bh);
 	sbi->s_lvid_dirty = 0;
+	mutex_unlock(&sbi->s_alloc_mutex);
 }
 
 static void udf_close_lvid(struct super_block *sb)
@@ -1806,6 +1840,7 @@ static void udf_close_lvid(struct super_block *sb)
 	if (!bh)
 		return;
 
+	mutex_lock(&sbi->s_alloc_mutex);
 	lvid = (struct logicalVolIntegrityDesc *)bh->b_data;
 	lvidiu = udf_sb_lvidiu(sbi);
 	lvidiu->impIdent.identSuffix[0] = UDF_OS_CLASS_UNIX;
@@ -1824,8 +1859,42 @@ static void udf_close_lvid(struct super_block *sb)
 				le16_to_cpu(lvid->descTag.descCRCLength)));
 
 	lvid->descTag.tagChecksum = udf_tag_checksum(&lvid->descTag);
+	/*
+	 * We set buffer uptodate unconditionally here to avoid spurious
+	 * warnings from mark_buffer_dirty() when previous EIO has marked
+	 * the buffer as !uptodate
+	 */
+	set_buffer_uptodate(bh);
 	mark_buffer_dirty(bh);
 	sbi->s_lvid_dirty = 0;
+	mutex_unlock(&sbi->s_alloc_mutex);
+}
+
+u64 lvid_get_unique_id(struct super_block *sb)
+{
+	struct buffer_head *bh;
+	struct udf_sb_info *sbi = UDF_SB(sb);
+	struct logicalVolIntegrityDesc *lvid;
+	struct logicalVolHeaderDesc *lvhd;
+	u64 uniqueID;
+	u64 ret;
+
+	bh = sbi->s_lvid_bh;
+	if (!bh)
+		return 0;
+
+	lvid = (struct logicalVolIntegrityDesc *)bh->b_data;
+	lvhd = (struct logicalVolHeaderDesc *)lvid->logicalVolContentsUse;
+
+	mutex_lock(&sbi->s_alloc_mutex);
+	ret = uniqueID = le64_to_cpu(lvhd->uniqueID);
+	if (!(++uniqueID & 0xFFFFFFFF))
+		uniqueID += 16;
+	lvhd->uniqueID = cpu_to_le64(uniqueID);
+	mutex_unlock(&sbi->s_alloc_mutex);
+	mark_buffer_dirty(bh);
+
+	return ret;
 }
 
 static void udf_sb_free_bitmap(struct udf_bitmap *bitmap)
@@ -1929,6 +1998,7 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 	sbi->s_fmode = uopt.fmode;
 	sbi->s_dmode = uopt.dmode;
 	sbi->s_nls_map = uopt.nls_map;
+	rwlock_init(&sbi->s_cred_lock);
 
 	if (uopt.session == 0xFFFFFFFF)
 		sbi->s_session = udf_get_last_session(sb);
@@ -2096,8 +2166,6 @@ static void udf_put_super(struct super_block *sb)
 
 	sbi = UDF_SB(sb);
 
-	lock_kernel();
-
 	if (sbi->s_vat_inode)
 		iput(sbi->s_vat_inode);
 	if (sbi->s_partitions)
@@ -2113,8 +2181,6 @@ static void udf_put_super(struct super_block *sb)
 	kfree(sbi->s_partmaps);
 	kfree(sb->s_fs_info);
 	sb->s_fs_info = NULL;
-
-	unlock_kernel();
 }
 
 static int udf_sync_fs(struct super_block *sb, int wait)
@@ -2177,8 +2243,6 @@ static unsigned int udf_count_free_bitmap(struct super_block *sb,
 	uint16_t ident;
 	struct spaceBitmapDesc *bm;
 
-	lock_kernel();
-
 	loc.logicalBlockNum = bitmap->s_extPosition;
 	loc.partitionReferenceNum = UDF_SB(sb)->s_partition;
 	bh = udf_read_ptagged(sb, &loc, 0, &ident);
@@ -2215,10 +2279,7 @@ static unsigned int udf_count_free_bitmap(struct super_block *sb,
 		}
 	}
 	brelse(bh);
-
 out:
-	unlock_kernel();
-
 	return accum;
 }
 
@@ -2231,8 +2292,7 @@ static unsigned int udf_count_free_table(struct super_block *sb,
 	int8_t etype;
 	struct extent_position epos;
 
-	lock_kernel();
-
+	mutex_lock(&UDF_SB(sb)->s_alloc_mutex);
 	epos.block = UDF_I(table)->i_location;
 	epos.offset = sizeof(struct unallocSpaceEntry);
 	epos.bh = NULL;
@@ -2241,8 +2301,7 @@ static unsigned int udf_count_free_table(struct super_block *sb,
 		accum += (elen >> table->i_sb->s_blocksize_bits);
 
 	brelse(epos.bh);
-
-	unlock_kernel();
+	mutex_unlock(&UDF_SB(sb)->s_alloc_mutex);
 
 	return accum;
 }

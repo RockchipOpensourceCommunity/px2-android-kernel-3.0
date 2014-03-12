@@ -25,21 +25,6 @@
 #include "raid0.h"
 #include "raid5.h"
 
-static void raid0_unplug(struct request_queue *q)
-{
-	mddev_t *mddev = q->queuedata;
-	raid0_conf_t *conf = mddev->private;
-	mdk_rdev_t **devlist = conf->devlist;
-	int raid_disks = conf->strip_zone[0].nb_dev;
-	int i;
-
-	for (i=0; i < raid_disks; i++) {
-		struct request_queue *r_queue = bdev_get_queue(devlist[i]->bdev);
-
-		blk_unplug(r_queue);
-	}
-}
-
 static int raid0_congested(void *data, int bits)
 {
 	mddev_t *mddev = data;
@@ -173,9 +158,19 @@ static int create_strip_zones(mddev_t *mddev, raid0_conf_t **private_conf)
 	list_for_each_entry(rdev1, &mddev->disks, same_set) {
 		int j = rdev1->raid_disk;
 
-		if (mddev->level == 10)
+		if (mddev->level == 10) {
 			/* taking over a raid10-n2 array */
 			j /= 2;
+			rdev1->new_raid_disk = j;
+		}
+
+		if (mddev->level == 1) {
+			/* taiking over a raid1 array-
+			 * we have only one active disk
+			 */
+			j = 0;
+			rdev1->new_raid_disk = j;
+		}
 
 		if (j < 0 || j >= mddev->raid_disks) {
 			printk(KERN_ERR "md/raid0:%s: bad disk number %d - "
@@ -262,7 +257,6 @@ static int create_strip_zones(mddev_t *mddev, raid0_conf_t **private_conf)
 		       mdname(mddev),
 		       (unsigned long long)smallest->sectors);
 	}
-	mddev->queue->unplug_fn = raid0_unplug;
 	mddev->queue->backing_dev_info.congested_fn = raid0_congested;
 	mddev->queue->backing_dev_info.congested_data = mddev;
 
@@ -351,7 +345,6 @@ static int raid0_run(mddev_t *mddev)
 	if (md_check_no_bitmap(mddev))
 		return -EINVAL;
 	blk_queue_max_hw_sectors(mddev->queue, mddev->chunk_sectors);
-	mddev->queue->queue_lock = &mddev->queue->__queue_lock;
 
 	/* if private is not null, we are here after takeover */
 	if (mddev->private == NULL) {
@@ -361,12 +354,6 @@ static int raid0_run(mddev_t *mddev)
 		mddev->private = conf;
 	}
 	conf = mddev->private;
-	if (conf->scale_raid_disks) {
-		int i;
-		for (i=0; i < conf->strip_zone[0].nb_dev; i++)
-			conf->devlist[i]->raid_disk /= conf->scale_raid_disks;
-		/* FIXME update sysfs rd links */
-	}
 
 	/* calculate array device size */
 	md_set_array_sectors(mddev, raid0_size(mddev, 0, 0));
@@ -392,8 +379,7 @@ static int raid0_run(mddev_t *mddev)
 
 	blk_queue_merge_bvec(mddev->queue, raid0_mergeable_bvec);
 	dump_zones(mddev);
-	md_integrity_register(mddev);
-	return 0;
+	return md_integrity_register(mddev);
 }
 
 static int raid0_stop(mddev_t *mddev)
@@ -487,8 +473,8 @@ static int raid0_make_request(mddev_t *mddev, struct bio *bio)
 	struct strip_zone *zone;
 	mdk_rdev_t *tmp_dev;
 
-	if (unlikely(bio_rw_flagged(bio, BIO_RW_BARRIER))) {
-		md_barrier_request(mddev, bio);
+	if (unlikely(bio->bi_rw & REQ_FLUSH)) {
+		md_flush_request(mddev, bio);
 		return 0;
 	}
 
@@ -573,7 +559,7 @@ static void raid0_status(struct seq_file *seq, mddev_t *mddev)
 	return;
 }
 
-static void *raid0_takeover_raid5(mddev_t *mddev)
+static void *raid0_takeover_raid45(mddev_t *mddev)
 {
 	mdk_rdev_t *rdev;
 	raid0_conf_t *priv_conf;
@@ -596,6 +582,7 @@ static void *raid0_takeover_raid5(mddev_t *mddev)
 
 	/* Set new parameters */
 	mddev->new_level = 0;
+	mddev->new_layout = 0;
 	mddev->new_chunk_sectors = mddev->chunk_sectors;
 	mddev->raid_disks--;
 	mddev->delta_disks = -1;
@@ -635,6 +622,7 @@ static void *raid0_takeover_raid10(mddev_t *mddev)
 
 	/* Set new parameters */
 	mddev->new_level = 0;
+	mddev->new_layout = 0;
 	mddev->new_chunk_sectors = mddev->chunk_sectors;
 	mddev->delta_disks = - mddev->raid_disks / 2;
 	mddev->raid_disks += mddev->delta_disks;
@@ -643,19 +631,49 @@ static void *raid0_takeover_raid10(mddev_t *mddev)
 	mddev->recovery_cp = MaxSector;
 
 	create_strip_zones(mddev, &priv_conf);
-	priv_conf->scale_raid_disks = 2;
+	return priv_conf;
+}
+
+static void *raid0_takeover_raid1(mddev_t *mddev)
+{
+	raid0_conf_t *priv_conf;
+
+	/* Check layout:
+	 *  - (N - 1) mirror drives must be already faulty
+	 */
+	if ((mddev->raid_disks - 1) != mddev->degraded) {
+		printk(KERN_ERR "md/raid0:%s: (N - 1) mirrors drives must be already faulty!\n",
+		       mdname(mddev));
+		return ERR_PTR(-EINVAL);
+	}
+
+	/* Set new parameters */
+	mddev->new_level = 0;
+	mddev->new_layout = 0;
+	mddev->new_chunk_sectors = 128; /* by default set chunk size to 64k */
+	mddev->delta_disks = 1 - mddev->raid_disks;
+	mddev->raid_disks = 1;
+	/* make sure it will be not marked as dirty */
+	mddev->recovery_cp = MaxSector;
+
+	create_strip_zones(mddev, &priv_conf);
 	return priv_conf;
 }
 
 static void *raid0_takeover(mddev_t *mddev)
 {
 	/* raid0 can take over:
+	 *  raid4 - if all data disks are active.
 	 *  raid5 - providing it is Raid4 layout and one disk is faulty
 	 *  raid10 - assuming we have all necessary active disks
+	 *  raid1 - with (N -1) mirror drives faulty
 	 */
+	if (mddev->level == 4)
+		return raid0_takeover_raid45(mddev);
+
 	if (mddev->level == 5) {
 		if (mddev->layout == ALGORITHM_PARITY_N)
-			return raid0_takeover_raid5(mddev);
+			return raid0_takeover_raid45(mddev);
 
 		printk(KERN_ERR "md/raid0:%s: Raid can only takeover Raid5 with layout: %d\n",
 		       mdname(mddev), ALGORITHM_PARITY_N);
@@ -663,6 +681,12 @@ static void *raid0_takeover(mddev_t *mddev)
 
 	if (mddev->level == 10)
 		return raid0_takeover_raid10(mddev);
+
+	if (mddev->level == 1)
+		return raid0_takeover_raid1(mddev);
+
+	printk(KERN_ERR "Takeover from raid%i to raid0 not supported\n",
+		mddev->level);
 
 	return ERR_PTR(-EINVAL);
 }

@@ -10,13 +10,17 @@
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/clk.h>
+#include <linux/cpufreq.h>
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/err.h>
 #include <linux/smp.h>
 #include <linux/jiffies.h>
 #include <linux/clockchips.h>
 #include <linux/irq.h>
 #include <linux/io.h>
+#include <linux/percpu.h>
 
 #include <asm/smp_twd.h>
 #include <asm/hardware/gic.h>
@@ -24,7 +28,9 @@
 /* set up by the platform code */
 void __iomem *twd_base;
 
+static struct clk *twd_clk;
 static unsigned long twd_timer_rate;
+static DEFINE_PER_CPU(struct clock_event_device *, twd_ce);
 
 static void twd_set_mode(enum clock_event_mode mode,
 			struct clock_event_device *clk)
@@ -36,6 +42,7 @@ static void twd_set_mode(enum clock_event_mode mode,
 		/* timer load already set up */
 		ctrl = TWD_TIMER_CONTROL_ENABLE | TWD_TIMER_CONTROL_IT_ENABLE
 			| TWD_TIMER_CONTROL_PERIODIC;
+		__raw_writel(twd_timer_rate / HZ, twd_base + TWD_TIMER_LOAD);
 		break;
 	case CLOCK_EVT_MODE_ONESHOT:
 		/* period set, and timer enabled in 'next_event' hook */
@@ -79,9 +86,55 @@ int twd_timer_ack(void)
 	return 0;
 }
 
+/*
+ * Updates clockevent frequency when the cpu frequency changes.
+ * Called on the cpu that is changing frequency with interrupts disabled.
+ */
+static void twd_update_frequency(void *data)
+{
+	twd_timer_rate = clk_get_rate(twd_clk);
+
+	clockevents_update_freq(__get_cpu_var(twd_ce), twd_timer_rate);
+}
+
+static int twd_cpufreq_transition(struct notifier_block *nb,
+	unsigned long state, void *data)
+{
+	struct cpufreq_freqs *freqs = data;
+
+	/*
+	 * The twd clock events must be reprogrammed to account for the new
+	 * frequency.  The timer is local to a cpu, so cross-call to the
+	 * changing cpu.
+	 *
+	 * Only wait for it to finish, if the cpu is active to avoid
+	 * deadlock when cpu1 is spinning on while(!cpu_active(cpu1)) during
+	 * booting of that cpu.
+	 */
+	if (state == CPUFREQ_POSTCHANGE || state == CPUFREQ_RESUMECHANGE)
+		smp_call_function_single(freqs->cpu, twd_update_frequency,
+					 NULL, cpu_active(freqs->cpu));
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block twd_cpufreq_nb = {
+	.notifier_call = twd_cpufreq_transition,
+};
+
+static int twd_cpufreq_init(void)
+{
+	if (!IS_ERR_OR_NULL(twd_clk))
+		return cpufreq_register_notifier(&twd_cpufreq_nb,
+			CPUFREQ_TRANSITION_NOTIFIER);
+
+	return 0;
+}
+core_initcall(twd_cpufreq_init);
+
 static void __cpuinit twd_calibrate_rate(void)
 {
-	unsigned long load, count;
+	unsigned long count;
 	u64 waitjiffies;
 
 	/*
@@ -114,12 +167,8 @@ static void __cpuinit twd_calibrate_rate(void)
 		twd_timer_rate = (0xFFFFFFFFU - count) * (HZ / 5);
 
 		printk("%lu.%02luMHz.\n", twd_timer_rate / 1000000,
-			(twd_timer_rate / 100000) % 100);
+			(twd_timer_rate / 10000) % 100);
 	}
-
-	load = twd_timer_rate / HZ;
-
-	__raw_writel(load, twd_base + TWD_TIMER_LOAD);
 }
 
 /*
@@ -127,35 +176,30 @@ static void __cpuinit twd_calibrate_rate(void)
  */
 void __cpuinit twd_timer_setup(struct clock_event_device *clk)
 {
-	unsigned long flags;
+	if (twd_clk == NULL) {
+		twd_clk = clk_get_sys("smp_twd", NULL);
+		if (IS_ERR_OR_NULL(twd_clk))
+			pr_warn("%s: no clock found\n", __func__);
+	}
 
-	twd_calibrate_rate();
+	if (!IS_ERR_OR_NULL(twd_clk))
+		twd_timer_rate = clk_get_rate(twd_clk);
+	else
+		twd_calibrate_rate();
+
+	__raw_writel(0, twd_base + TWD_TIMER_CONTROL);
 
 	clk->name = "local_timer";
-	clk->features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT;
+	clk->features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT |
+			CLOCK_EVT_FEAT_C3STOP;
 	clk->rating = 350;
 	clk->set_mode = twd_set_mode;
 	clk->set_next_event = twd_set_next_event;
-	clk->shift = 20;
-	clk->mult = div_sc(twd_timer_rate, NSEC_PER_SEC, clk->shift);
-	clk->max_delta_ns = clockevent_delta2ns(0xffffffff, clk);
-	clk->min_delta_ns = clockevent_delta2ns(0xf, clk);
+
+	__get_cpu_var(twd_ce) = clk;
+
+	clockevents_config_and_register(clk, twd_timer_rate, 0xf, 0xffffffff);
 
 	/* Make sure our local interrupt controller has this enabled */
-	local_irq_save(flags);
-	irq_to_desc(clk->irq)->status |= IRQ_NOPROBE;
-	get_irq_chip(clk->irq)->unmask(clk->irq);
-	local_irq_restore(flags);
-
-	clockevents_register_device(clk);
+	gic_enable_ppi(clk->irq);
 }
-
-#ifdef CONFIG_HOTPLUG_CPU
-/*
- * take a local timer down
- */
-void twd_timer_stop(void)
-{
-	__raw_writel(0, twd_base + TWD_TIMER_CONTROL);
-}
-#endif

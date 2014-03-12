@@ -1768,6 +1768,18 @@ sys_call_table:
 	data8 sys_pwritev			// 1320
 	data8 sys_rt_tgsigqueueinfo
 	data8 sys_recvmmsg
+	data8 sys_fanotify_init
+	data8 sys_fanotify_mark
+	data8 sys_prlimit64			// 1325
+	data8 sys_name_to_handle_at
+	data8 sys_open_by_handle_at
+	data8 sys_clock_adjtime
+	data8 sys_syncfs
+	data8 sys_setns				// 1330
+	data8 sys_sendmmsg
+	data8 sys_ni_syscall	/* process_vm_readv */
+	data8 sys_ni_syscall	/* process_vm_writev */
+	data8 sys_accept4
 
 	.org sys_call_table + 8*NR_syscalls	// guard against failures to increase NR_syscalls
 #endif /* __IA64_ASM_PARAVIRTUALIZED_NATIVE */

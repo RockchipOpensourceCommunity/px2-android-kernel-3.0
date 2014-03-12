@@ -117,8 +117,7 @@ int comedi_device_attach(struct comedi_device *dev, struct comedi_devconfig *it)
 
 	for (driv = comedi_drivers; driv; driv = driv->next) {
 		if (!try_module_get(driv->module)) {
-			printk
-			    (KERN_INFO "comedi: failed to increment module count, skipping\n");
+			printk(KERN_INFO "comedi: failed to increment module count, skipping\n");
 			continue;
 		}
 		if (driv->num_names) {
@@ -205,9 +204,8 @@ int comedi_driver_unregister(struct comedi_driver *driver)
 		mutex_lock(&dev->mutex);
 		if (dev->attached && dev->driver == driver) {
 			if (dev->use_count)
-				printk
-				    (KERN_WARNING "BUG! detaching device with use_count=%d\n",
-				     dev->use_count);
+				printk(KERN_WARNING "BUG! detaching device with use_count=%d\n",
+						dev->use_count);
 			comedi_device_detach(dev);
 		}
 		mutex_unlock(&dev->mutex);
@@ -442,7 +440,9 @@ int comedi_buf_alloc(struct comedi_device *dev, struct comedi_subdevice *s,
 		unsigned i;
 		for (i = 0; i < async->n_buf_pages; ++i) {
 			if (async->buf_page_list[i].virt_addr) {
-				clear_bit(PG_reserved, &(virt_to_page(async->buf_page_list[i].virt_addr)->flags));
+				clear_bit(PG_reserved,
+					&(virt_to_page(async->buf_page_list[i].
+							virt_addr)->flags));
 				if (s->async_dma_dir != DMA_NONE) {
 					dma_free_coherent(dev->hw_dev,
 							  PAGE_SIZE,
@@ -470,12 +470,10 @@ int comedi_buf_alloc(struct comedi_device *dev, struct comedi_subdevice *s,
 		struct page **pages = NULL;
 
 		async->buf_page_list =
-		    vmalloc(sizeof(struct comedi_buf_page) * n_pages);
-		if (async->buf_page_list) {
-			memset(async->buf_page_list, 0,
-			       sizeof(struct comedi_buf_page) * n_pages);
+		    vzalloc(sizeof(struct comedi_buf_page) * n_pages);
+		if (async->buf_page_list)
 			pages = vmalloc(sizeof(struct page *) * n_pages);
-		}
+
 		if (pages) {
 			for (i = 0; i < n_pages; i++) {
 				if (s->async_dma_dir != DMA_NONE) {
@@ -496,8 +494,10 @@ int comedi_buf_alloc(struct comedi_device *dev, struct comedi_subdevice *s,
 					break;
 
 				set_bit(PG_reserved,
-					&(virt_to_page(async->buf_page_list[i].virt_addr)->flags));
-				pages[i] = virt_to_page(async->buf_page_list[i].virt_addr);
+					&(virt_to_page(async->buf_page_list[i].
+							virt_addr)->flags));
+				pages[i] = virt_to_page(async->buf_page_list[i].
+								virt_addr);
 			}
 		}
 		if (i == n_pages) {
@@ -514,7 +514,10 @@ int comedi_buf_alloc(struct comedi_device *dev, struct comedi_subdevice *s,
 					    NULL) {
 						break;
 					}
-					clear_bit(PG_reserved, &(virt_to_page(async->buf_page_list[i].virt_addr)->flags));
+					clear_bit(PG_reserved,
+						&(virt_to_page(async->
+							buf_page_list[i].
+							virt_addr)->flags));
 					if (s->async_dma_dir != DMA_NONE) {
 						dma_free_coherent(dev->hw_dev,
 								  PAGE_SIZE,
@@ -646,8 +649,7 @@ unsigned comedi_buf_write_free(struct comedi_async *async, unsigned int nbytes)
 {
 	if ((int)(async->buf_write_count + nbytes -
 		  async->buf_write_alloc_count) > 0) {
-		printk
-		    (KERN_INFO "comedi: attempted to write-free more bytes than have been write-allocated.\n");
+		printk(KERN_INFO "comedi: attempted to write-free more bytes than have been write-allocated.\n");
 		nbytes = async->buf_write_alloc_count - async->buf_write_count;
 	}
 	async->buf_write_count += nbytes;
@@ -817,24 +819,13 @@ static int comedi_auto_config(struct device *hardware_device,
 	int minor;
 	struct comedi_device_file_info *dev_file_info;
 	int retval;
-	unsigned *private_data = NULL;
 
-	if (!comedi_autoconfig) {
-		dev_set_drvdata(hardware_device, NULL);
+	if (!comedi_autoconfig)
 		return 0;
-	}
 
 	minor = comedi_alloc_board_minor(hardware_device);
 	if (minor < 0)
 		return minor;
-
-	private_data = kmalloc(sizeof(unsigned), GFP_KERNEL);
-	if (private_data == NULL) {
-		retval = -ENOMEM;
-		goto cleanup;
-	}
-	*private_data = minor;
-	dev_set_drvdata(hardware_device, private_data);
 
 	dev_file_info = comedi_get_device_file_info(minor);
 
@@ -848,25 +839,22 @@ static int comedi_auto_config(struct device *hardware_device,
 	retval = comedi_device_attach(dev_file_info->device, &it);
 	mutex_unlock(&dev_file_info->device->mutex);
 
-cleanup:
-	if (retval < 0) {
-		kfree(private_data);
+	if (retval < 0)
 		comedi_free_board_minor(minor);
-	}
 	return retval;
 }
 
 static void comedi_auto_unconfig(struct device *hardware_device)
 {
-	unsigned *minor = (unsigned *)dev_get_drvdata(hardware_device);
-	if (minor == NULL)
+	int minor;
+
+	if (hardware_device == NULL)
 		return;
-
-	BUG_ON(*minor >= COMEDI_NUM_BOARD_MINORS);
-
-	comedi_free_board_minor(*minor);
-	dev_set_drvdata(hardware_device, NULL);
-	kfree(minor);
+	minor = comedi_find_board_minor(hardware_device);
+	if (minor < 0)
+		return;
+	BUG_ON(minor >= COMEDI_NUM_BOARD_MINORS);
+	comedi_free_board_minor(minor);
 }
 
 int comedi_pci_auto_config(struct pci_dev *pcidev, const char *board_name)

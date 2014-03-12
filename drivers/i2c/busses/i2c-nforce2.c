@@ -356,7 +356,7 @@ static int __devinit nforce2_probe_smb (struct pci_dev *dev, int bar,
 	error = acpi_check_region(smbus->base, smbus->size,
 				  nforce2_driver.name);
 	if (error)
-		return -1;
+		return error;
 
 	if (!request_region(smbus->base, smbus->size, nforce2_driver.name)) {
 		dev_err(&smbus->adapter.dev, "Error requesting region %02x .. %02X for %s\n",
@@ -432,7 +432,7 @@ static int __devinit nforce2_probe(struct pci_dev *dev, const struct pci_device_
 
 static void __devexit nforce2_remove(struct pci_dev *dev)
 {
-	struct nforce2_smbus *smbuses = (void*) pci_get_drvdata(dev);
+	struct nforce2_smbus *smbuses = pci_get_drvdata(dev);
 
 	nforce2_set_reference(NULL);
 	if (smbuses[0].base) {

@@ -123,21 +123,22 @@ static void usb_parse_ss_endpoint_companion(struct device *ddev, int cfgno,
 	}
 
 	if (usb_endpoint_xfer_isoc(&ep->desc))
-		max_tx = ep->desc.wMaxPacketSize * (desc->bMaxBurst + 1) *
-			(desc->bmAttributes + 1);
+		max_tx = (desc->bMaxBurst + 1) * (desc->bmAttributes + 1) *
+			le16_to_cpu(ep->desc.wMaxPacketSize);
 	else if (usb_endpoint_xfer_int(&ep->desc))
-		max_tx = ep->desc.wMaxPacketSize * (desc->bMaxBurst + 1);
+		max_tx = le16_to_cpu(ep->desc.wMaxPacketSize) *
+			(desc->bMaxBurst + 1);
 	else
 		max_tx = 999999;
-	if (desc->wBytesPerInterval > max_tx) {
+	if (le16_to_cpu(desc->wBytesPerInterval) > max_tx) {
 		dev_warn(ddev, "%s endpoint with wBytesPerInterval of %d in "
 				"config %d interface %d altsetting %d ep %d: "
 				"setting to %d\n",
 				usb_endpoint_xfer_isoc(&ep->desc) ? "Isoc" : "Int",
-				desc->wBytesPerInterval,
+				le16_to_cpu(desc->wBytesPerInterval),
 				cfgno, inum, asnum, ep->desc.bEndpointAddress,
 				max_tx);
-		ep->ss_ep_comp.wBytesPerInterval = max_tx;
+		ep->ss_ep_comp.wBytesPerInterval = cpu_to_le16(max_tx);
 	}
 }
 
@@ -703,7 +704,7 @@ int usb_get_configuration(struct usb_device *dev)
 			    "descriptor/%s: %d\n", cfgno, "start", result);
 			dev_err(ddev, "chopping to %d config(s)\n", cfgno);
 			dev->descriptor.bNumConfigurations = cfgno;
-			break;
+			goto err;
 		} else if (result < 4) {
 			dev_err(ddev, "config index %d descriptor too short "
 			    "(expected %i, got %i)\n", cfgno,

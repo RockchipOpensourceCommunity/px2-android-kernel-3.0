@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2010, Intel Corp.
+ * Copyright (C) 2000 - 2011, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -119,6 +119,10 @@
 
 #define ACPI_MAX_LOOP_ITERATIONS        0xFFFF
 
+/* Maximum sleep allowed via Sleep() operator */
+
+#define ACPI_MAX_SLEEP                  2000	/* Two seconds */
+
 /******************************************************************************
  *
  * ACPI Specification constants (Do not change unless the specification changes)
@@ -183,7 +187,6 @@
 
 /* Operation regions */
 
-#define ACPI_NUM_PREDEFINED_REGIONS     9
 #define ACPI_USER_REGION_BEGIN          0x80
 
 /* Maximum space_ids for Operation Regions */

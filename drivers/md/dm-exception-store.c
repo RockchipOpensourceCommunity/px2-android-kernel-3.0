@@ -173,7 +173,9 @@ int dm_exception_store_set_chunk_size(struct dm_exception_store *store,
 
 	/* Validate the chunk size against the device block size */
 	if (chunk_size %
-	    (bdev_logical_block_size(dm_snap_cow(store->snap)->bdev) >> 9)) {
+	    (bdev_logical_block_size(dm_snap_cow(store->snap)->bdev) >> 9) ||
+	    chunk_size %
+	    (bdev_logical_block_size(dm_snap_origin(store->snap)->bdev) >> 9)) {
 		*error = "Chunk size is not a multiple of device blocksize";
 		return -EINVAL;
 	}
@@ -280,7 +282,7 @@ int dm_exception_store_init(void)
 	return 0;
 
 persistent_fail:
-	dm_persistent_snapshot_exit();
+	dm_transient_snapshot_exit();
 transient_fail:
 	return r;
 }

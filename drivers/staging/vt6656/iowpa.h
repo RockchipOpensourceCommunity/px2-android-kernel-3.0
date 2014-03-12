@@ -31,9 +31,7 @@
 
 /*---------------------  Export Definitions -------------------------*/
 
-
 #define WPA_IE_LEN 64
-
 
 //WPA related
 /*
@@ -54,7 +52,7 @@ enum {
 	VIAWGET_SET_DROP_UNENCRYPT = 7,
 	VIAWGET_SET_DEAUTHENTICATE = 8,
 	VIAWGET_SET_ASSOCIATE = 9,
-	VIAWGET_SET_DISASSOCIATE= 10
+	VIAWGET_SET_DISASSOCIATE = 10
 };
 
 
@@ -69,14 +67,11 @@ enum {
 
 
 
-#pragma pack(1)
 typedef struct viawget_wpa_header {
 	u8 type;
 	u16 req_ie_len;
 	u16 resp_ie_len;
-} viawget_wpa_header;
-
-
+} __packed viawget_wpa_header;
 
 struct viawget_wpa_param {
 	u32 cmd;
@@ -86,46 +81,39 @@ struct viawget_wpa_param {
 			u8 len;
 			u8 data[0];
 		} generic_elem;
-
 		struct {
-        	u8 bssid[6];
+			u8 bssid[6];
 			u8 ssid[32];
 			u8 ssid_len;
-        	u8 *wpa_ie;
-        	u16 wpa_ie_len;
-        	int pairwise_suite;
-        	int group_suite;
-        	int key_mgmt_suite;
-        	int auth_alg;
-        	int mode;
-                u8 roam_dbm;  //DavidWang
+			u8 *wpa_ie;
+			u16 wpa_ie_len;
+			int pairwise_suite;
+			int group_suite;
+			int key_mgmt_suite;
+			int auth_alg;
+			int mode;
+			u8 roam_dbm;
 		} wpa_associate;
-
 		struct {
-	        int alg_name;
-	        u16 key_index;
-	        u16 set_tx;
-	        u8 *seq;
-	        u16 seq_len;
-	        u8 *key;
-	        u16 key_len;
+			int alg_name;
+			u16 key_index;
+			u16 set_tx;
+			u8 *seq;
+			u16 seq_len;
+			u8 *key;
+			u16 key_len;
 		} wpa_key;
-
 		struct {
 			u8 ssid_len;
 			u8 ssid[32];
 		} scan_req;
-
 		struct {
 			u16 scan_count;
 			u8 *buf;
 		} scan_results;
-
 	} u;
+} __packed;
 
-};
-
-#pragma pack(1)
 struct viawget_scan_result {
 	u8 bssid[6];
 	u8 ssid[32];
@@ -140,16 +128,13 @@ struct viawget_scan_result {
 	int noise;
 	int level;
 	int maxrate;
-};
-
+} __packed;
 
 /*---------------------  Export Classes  ----------------------------*/
 
 /*---------------------  Export Variables  --------------------------*/
 
-
 /*---------------------  Export Types  ------------------------------*/
-
 
 /*---------------------  Export Functions  --------------------------*/
 

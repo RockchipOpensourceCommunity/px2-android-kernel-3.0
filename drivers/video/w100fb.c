@@ -858,9 +858,9 @@ unsigned long w100fb_gpio_read(int port)
 void w100fb_gpio_write(int port, unsigned long value)
 {
 	if (port==W100_GPIO_PORT_A)
-		value = writel(value, remapped_regs + mmGPIO_DATA);
+		writel(value, remapped_regs + mmGPIO_DATA);
 	else
-		value = writel(value, remapped_regs + mmGPIO_DATA2);
+		writel(value, remapped_regs + mmGPIO_DATA2);
 }
 EXPORT_SYMBOL(w100fb_gpio_read);
 EXPORT_SYMBOL(w100fb_gpio_write);
@@ -1306,7 +1306,7 @@ static void w100_init_lcd(struct w100fb_par *par)
 	union graphic_v_disp_u graphic_v_disp;
 	union crtc_total_u crtc_total;
 
-	/* w3200 doesnt like undefined bits being set so zero register values first */
+	/* w3200 doesn't like undefined bits being set so zero register values first */
 
 	active_h_disp.val = 0;
 	active_h_disp.f.active_h_start=mode->left_margin;

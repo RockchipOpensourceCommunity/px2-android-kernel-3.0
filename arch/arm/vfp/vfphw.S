@@ -77,15 +77,12 @@ ENTRY(vfp_support_entry)
 	bne	look_for_VFP_exceptions	@ VFP is already enabled
 
 	DBGSTR1 "enable %x", r10
-	ldr	r3, last_VFP_context_address
+	ldr	r3, vfp_current_hw_state_address
 	orr	r1, r1, #FPEXC_EN	@ user FPEXC has the enable bit set
-	ldr	r4, [r3, r11, lsl #2]	@ last_VFP_context pointer
+	ldr	r4, [r3, r11, lsl #2]	@ vfp_current_hw_state pointer
 	bic	r5, r1, #FPEXC_EX	@ make sure exceptions are disabled
-	cmp	r4, r10
-	beq	check_for_exception	@ we are returning to the same
-					@ process, so the registers are
-					@ still there.  In this case, we do
-					@ not want to drop a pending exception.
+	cmp	r4, r10			@ this thread owns the hw context?
+	beq	vfp_hw_state_valid
 
 	VFPFMXR	FPEXC, r5		@ enable VFP, disable any pending
 					@ exceptions, so we can get at the
@@ -116,7 +113,7 @@ ENTRY(vfp_support_entry)
 
 no_old_VFP_process:
 	DBGSTR1	"load state %p", r10
-	str	r10, [r3, r11, lsl #2]	@ update the last_VFP_context pointer
+	str	r10, [r3, r11, lsl #2]	@ update the vfp_current_hw_state pointer
 					@ Load the saved state back into the VFP
 	VFPFLDMIA r10, r5		@ reload the working registers while
 					@ FPEXC is in a safe state
@@ -132,7 +129,8 @@ no_old_VFP_process:
 #endif
 	VFPFMXR	FPSCR, r5		@ restore status
 
-check_for_exception:
+@ The context stored in the VFP hardware is up to date with this thread
+vfp_hw_state_valid:
 	tst	r1, #FPEXC_EX
 	bne	process_exception	@ might as well handle the pending
 					@ exception before retrying branch
@@ -206,8 +204,28 @@ ENTRY(vfp_save_state)
 	mov	pc, lr
 ENDPROC(vfp_save_state)
 
-last_VFP_context_address:
-	.word	last_VFP_context
+#ifdef CONFIG_ARCH_RK29
+ENTRY(vfp_load_state)
+	@ Save the current VFP state
+	@ r0 - save location
+	@ r1 - FPEXC
+	DBGSTR1	"save VFP state %p", r0
+	VFPFLDMIA r0, r2		@ save the working registers
+	ldmia   r0, {r1,r2,r3,r12}
+	tst	r1, #FPEXC_EX		@ is there additional state to save?
+	beq	1f
+	tst	r1, #FPEXC_FP2V		@ is there an FPINST2 to read?
+	beq	1f
+1:
+	VFPFMXR FPSCR, r2
+	VFPFMXR	FPEXC, r1
+	mov	pc, lr
+ENDPROC(vfp_load_state)
+#endif
+
+	.align
+vfp_current_hw_state_address:
+	.word	vfp_current_hw_state
 
 	.macro	tbl_branch, base, tmp, shift
 #ifdef CONFIG_THUMB2_KERNEL
@@ -277,7 +295,7 @@ ENTRY(vfp_put_double)
 #ifdef CONFIG_VFPv3
 	@ d16 - d31 registers
 	.irp	dr,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-1:	mcrr	p11, 3, r1, r2, c\dr	@ fmdrr	r1, r2, d\dr
+1:	mcrr	p11, 3, r0, r1, c\dr	@ fmdrr	r0, r1, d\dr
 	mov	pc, lr
 	.org	1b + 8
 	.endr

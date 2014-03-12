@@ -37,7 +37,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <linux/usb/functionfs.h>
+#include "../../include/linux/usb/functionfs.h"
 
 
 /******************** Little Endian Handling ********************************/
@@ -324,7 +324,7 @@ static void *start_thread_helper(void *arg)
 
 		ret = t->in(t, t->buf, t->buf_size);
 		if (ret > 0) {
-			ret = t->out(t, t->buf, t->buf_size);
+			ret = t->out(t, t->buf, ret);
 			name = out_name;
 			op = "write";
 		} else {
@@ -450,7 +450,7 @@ invalid:
 		    len, expected, *p);
 		for (p = buf, len = 0; len < nbytes; ++p, ++len) {
 			if (0 == (len % 32))
-				fprintf(stderr, "%4d:", len);
+				fprintf(stderr, "%4zd:", len);
 			fprintf(stderr, " %02x", *p);
 			if (31 == (len % 32))
 				fprintf(stderr, "\n");

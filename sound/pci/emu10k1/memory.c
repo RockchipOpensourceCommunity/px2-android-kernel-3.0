@@ -248,7 +248,7 @@ static int is_valid_page(struct snd_emu10k1 *emu, dma_addr_t addr)
 /*
  * map the given memory block on PTB.
  * if the block is already mapped, update the link order.
- * if no empty pages are found, tries to release unsed memory blocks
+ * if no empty pages are found, tries to release unused memory blocks
  * and retry the mapping.
  */
 int snd_emu10k1_memblk_map(struct snd_emu10k1 *emu, struct snd_emu10k1_memblk *blk)
@@ -310,8 +310,10 @@ snd_emu10k1_alloc_pages(struct snd_emu10k1 *emu, struct snd_pcm_substream *subst
 	if (snd_BUG_ON(!hdr))
 		return NULL;
 
+	idx = runtime->period_size >= runtime->buffer_size ?
+					(emu->delay_pcm_irq * 2) : 0;
 	mutex_lock(&hdr->block_mutex);
-	blk = search_empty(emu, runtime->dma_bytes);
+	blk = search_empty(emu, runtime->dma_bytes + idx);
 	if (blk == NULL) {
 		mutex_unlock(&hdr->block_mutex);
 		return NULL;

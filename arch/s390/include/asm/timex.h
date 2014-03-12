@@ -11,6 +11,8 @@
 #ifndef _ASM_S390_TIMEX_H
 #define _ASM_S390_TIMEX_H
 
+#include <asm/lowcore.h>
+
 /* The value of the TOD clock for 1.1.1970. */
 #define TOD_UNIX_EPOCH 0x7d91048bca000000ULL
 
@@ -47,6 +49,24 @@ static inline void set_clock_comparator(__u64 time)
 static inline void store_clock_comparator(__u64 *time)
 {
 	asm volatile("stckc %0" : "=Q" (*time));
+}
+
+void clock_comparator_work(void);
+
+static inline unsigned long long local_tick_disable(void)
+{
+	unsigned long long old;
+
+	old = S390_lowcore.clock_comparator;
+	S390_lowcore.clock_comparator = -1ULL;
+	set_clock_comparator(S390_lowcore.clock_comparator);
+	return old;
+}
+
+static inline void local_tick_enable(unsigned long long comp)
+{
+	S390_lowcore.clock_comparator = comp;
+	set_clock_comparator(S390_lowcore.clock_comparator);
 }
 
 #define CLOCK_TICK_RATE	1193180 /* Underlying HZ */
@@ -104,6 +124,34 @@ extern u64 sched_clock_base_cc;
 static inline unsigned long long get_clock_monotonic(void)
 {
 	return get_clock_xt() - sched_clock_base_cc;
+}
+
+/**
+ * tod_to_ns - convert a TOD format value to nanoseconds
+ * @todval: to be converted TOD format value
+ * Returns: number of nanoseconds that correspond to the TOD format value
+ *
+ * Converting a 64 Bit TOD format value to nanoseconds means that the value
+ * must be divided by 4.096. In order to achieve that we multiply with 125
+ * and divide by 512:
+ *
+ *    ns = (todval * 125) >> 9;
+ *
+ * In order to avoid an overflow with the multiplication we can rewrite this.
+ * With a split todval == 2^32 * th + tl (th upper 32 bits, tl lower 32 bits)
+ * we end up with
+ *
+ *    ns = ((2^32 * th + tl) * 125 ) >> 9;
+ * -> ns = (2^23 * th * 125) + ((tl * 125) >> 9);
+ *
+ */
+static inline unsigned long long tod_to_ns(unsigned long long todval)
+{
+	unsigned long long ns;
+
+	ns = ((todval >> 32) << 23) * 125;
+	ns += ((todval & 0xffffffff) * 125) >> 9;
+	return ns;
 }
 
 #endif

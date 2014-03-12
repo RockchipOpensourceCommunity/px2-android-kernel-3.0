@@ -19,21 +19,15 @@
 #define _COMPONENT		ACPI_PROCESSOR_COMPONENT
 ACPI_MODULE_NAME("processor_core");
 
-static int set_no_mwait(const struct dmi_system_id *id)
+static int __init set_no_mwait(const struct dmi_system_id *id)
 {
 	printk(KERN_NOTICE PREFIX "%s detected - "
 		"disabling mwait for CPU C-states\n", id->ident);
-	idle_nomwait = 1;
+	boot_option_idle_override = IDLE_NOMWAIT;
 	return 0;
 }
 
-static struct dmi_system_id __cpuinitdata processor_idle_dmi_table[] = {
-	{
-	set_no_mwait, "IFL91 board", {
-	DMI_MATCH(DMI_BIOS_VENDOR, "COMPAL"),
-	DMI_MATCH(DMI_SYS_VENDOR, "ZEPTO"),
-	DMI_MATCH(DMI_PRODUCT_VERSION, "3215W"),
-	DMI_MATCH(DMI_BOARD_NAME, "IFL91") }, NULL},
+static struct dmi_system_id __initdata processor_idle_dmi_table[] = {
 	{
 	set_no_mwait, "Extensa 5220", {
 	DMI_MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
@@ -43,7 +37,6 @@ static struct dmi_system_id __cpuinitdata processor_idle_dmi_table[] = {
 	{},
 };
 
-#ifdef CONFIG_SMP
 static int map_lapic_id(struct acpi_subtable_header *entry,
 		 u32 acpi_id, int *apic_id)
 {
@@ -171,25 +164,56 @@ exit:
 
 int acpi_get_cpuid(acpi_handle handle, int type, u32 acpi_id)
 {
+#ifdef CONFIG_SMP
 	int i;
+#endif
 	int apic_id = -1;
 
 	apic_id = map_mat_entry(handle, type, acpi_id);
 	if (apic_id == -1)
 		apic_id = map_madt_entry(type, acpi_id);
-	if (apic_id == -1)
-		return apic_id;
+	if (apic_id == -1) {
+		/*
+		 * On UP processor, there is no _MAT or MADT table.
+		 * So above apic_id is always set to -1.
+		 *
+		 * BIOS may define multiple CPU handles even for UP processor.
+		 * For example,
+		 *
+		 * Scope (_PR)
+                 * {
+		 *     Processor (CPU0, 0x00, 0x00000410, 0x06) {}
+		 *     Processor (CPU1, 0x01, 0x00000410, 0x06) {}
+		 *     Processor (CPU2, 0x02, 0x00000410, 0x06) {}
+		 *     Processor (CPU3, 0x03, 0x00000410, 0x06) {}
+		 * }
+		 *
+		 * Ignores apic_id and always returns 0 for the processor
+		 * handle with acpi id 0 if nr_cpu_ids is 1.
+		 * This should be the case if SMP tables are not found.
+		 * Return -1 for other CPU's handle.
+		 */
+		if (nr_cpu_ids <= 1 && acpi_id == 0)
+			return acpi_id;
+		else
+			return apic_id;
+	}
 
+#ifdef CONFIG_SMP
 	for_each_possible_cpu(i) {
 		if (cpu_physical_id(i) == apic_id)
 			return i;
 	}
+#else
+	/* In UP kernel, only processor 0 is valid */
+	if (apic_id == 0)
+		return apic_id;
+#endif
 	return -1;
 }
 EXPORT_SYMBOL_GPL(acpi_get_cpuid);
-#endif
 
-static bool processor_physically_present(acpi_handle handle)
+static bool __init processor_physically_present(acpi_handle handle)
 {
 	int cpuid, type;
 	u32 acpi_id;
@@ -229,7 +253,7 @@ static bool processor_physically_present(acpi_handle handle)
 	return true;
 }
 
-static void acpi_set_pdc_bits(u32 *buf)
+static void __cpuinit acpi_set_pdc_bits(u32 *buf)
 {
 	buf[0] = ACPI_PDC_REVISION_ID;
 	buf[1] = 1;
@@ -241,7 +265,7 @@ static void acpi_set_pdc_bits(u32 *buf)
 	arch_acpi_set_pdc_bits(buf);
 }
 
-static struct acpi_object_list *acpi_processor_alloc_pdc(void)
+static struct acpi_object_list *__cpuinit acpi_processor_alloc_pdc(void)
 {
 	struct acpi_object_list *obj_list;
 	union acpi_object *obj;
@@ -284,12 +308,12 @@ static struct acpi_object_list *acpi_processor_alloc_pdc(void)
  * _PDC is required for a BIOS-OS handshake for most of the newer
  * ACPI processor features.
  */
-static int
+static int __cpuinit
 acpi_processor_eval_pdc(acpi_handle handle, struct acpi_object_list *pdc_in)
 {
 	acpi_status status = AE_OK;
 
-	if (idle_nomwait) {
+	if (boot_option_idle_override == IDLE_NOMWAIT) {
 		/*
 		 * If mwait is disabled for CPU C-states, the C2C3_FFH access
 		 * mode will be disabled in the parameter of _PDC object.
@@ -312,7 +336,7 @@ acpi_processor_eval_pdc(acpi_handle handle, struct acpi_object_list *pdc_in)
 	return status;
 }
 
-void acpi_processor_set_pdc(acpi_handle handle)
+void __cpuinit acpi_processor_set_pdc(acpi_handle handle)
 {
 	struct acpi_object_list *obj_list;
 
@@ -329,9 +353,8 @@ void acpi_processor_set_pdc(acpi_handle handle)
 	kfree(obj_list->pointer);
 	kfree(obj_list);
 }
-EXPORT_SYMBOL_GPL(acpi_processor_set_pdc);
 
-static acpi_status
+static acpi_status __init
 early_init_pdc(acpi_handle handle, u32 lvl, void *context, void **rv)
 {
 	if (processor_physically_present(handle) == false)
@@ -352,4 +375,5 @@ void __init acpi_early_processor_set_pdc(void)
 	acpi_walk_namespace(ACPI_TYPE_PROCESSOR, ACPI_ROOT_OBJECT,
 			    ACPI_UINT32_MAX,
 			    early_init_pdc, NULL, NULL, NULL);
+	acpi_get_devices("ACPI0007", early_init_pdc, NULL, NULL);
 }

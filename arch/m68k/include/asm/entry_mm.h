@@ -3,6 +3,9 @@
 
 #include <asm/setup.h>
 #include <asm/page.h>
+#ifdef __ASSEMBLY__
+#include <asm/thread_info.h>
+#endif
 
 /*
  * Stack layout in 'ret_from_exception':
@@ -32,8 +35,8 @@
 
 /* the following macro is used when enabling interrupts */
 #if defined(MACH_ATARI_ONLY)
-	/* block out HSYNC on the atari */
-#define ALLOWINT	(~0x400)
+	/* block out HSYNC = ipl 2 on the atari */
+#define ALLOWINT	(~0x500)
 #define	MAX_NOINT_IPL	3
 #else
 	/* portable version */
@@ -46,14 +49,6 @@
 #define curptr a2
 
 LFLUSH_I_AND_D = 0x00000808
-
-/* process bits for task_struct.ptrace */
-PT_TRACESYS_OFF = 3
-PT_TRACESYS_BIT = 1
-PT_PTRACED_OFF = 3
-PT_PTRACED_BIT = 0
-PT_DTRACE_OFF = 3
-PT_DTRACE_BIT = 2
 
 #define SAVE_ALL_INT save_all_int
 #define SAVE_ALL_SYS save_all_sys

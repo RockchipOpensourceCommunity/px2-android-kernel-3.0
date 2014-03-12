@@ -110,8 +110,10 @@ int ramfs_nommu_expand_for_mapping(struct inode *inode, size_t newsize)
 
 		/* prevent the page from being discarded on memory pressure */
 		SetPageDirty(page);
+		SetPageUptodate(page);
 
 		unlock_page(page);
+		put_page(page);
 	}
 
 	return 0;
@@ -146,9 +148,8 @@ static int ramfs_nommu_resize(struct inode *inode, loff_t newsize, loff_t size)
 			return ret;
 	}
 
-	ret = simple_setsize(inode, newsize);
-
-	return ret;
+	truncate_setsize(inode, newsize);
+	return 0;
 }
 
 /*****************************************************************************/
@@ -183,7 +184,7 @@ static int ramfs_nommu_setattr(struct dentry *dentry, struct iattr *ia)
 		}
 	}
 
-	generic_setattr(inode, ia);
+	setattr_copy(inode, ia);
  out:
 	ia->ia_valid = old_ia_valid;
 	return ret;

@@ -1,5 +1,5 @@
 /*
- *  include/linux/eventpoll.h ( Efficent event polling implementation )
+ *  include/linux/eventpoll.h ( Efficient event polling implementation )
  *  Copyright (C) 2001,...,2006	 Davide Libenzi
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -61,6 +61,7 @@ struct file;
 static inline void eventpoll_init_file(struct file *file)
 {
 	INIT_LIST_HEAD(&file->f_ep_links);
+	INIT_LIST_HEAD(&file->f_tfile_llink);
 }
 
 

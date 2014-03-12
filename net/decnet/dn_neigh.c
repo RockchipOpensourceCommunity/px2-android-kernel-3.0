@@ -48,7 +48,6 @@
 #include <net/dn_neigh.h>
 #include <net/dn_route.h>
 
-static u32 dn_neigh_hash(const void *pkey, const struct net_device *dev);
 static int dn_neigh_construct(struct neighbour *);
 static void dn_long_error_report(struct neighbour *, struct sk_buff *);
 static void dn_short_error_report(struct neighbour *, struct sk_buff *);
@@ -93,6 +92,13 @@ static const struct neigh_ops dn_phase3_ops = {
 	.queue_xmit =		dev_queue_xmit
 };
 
+static u32 dn_neigh_hash(const void *pkey,
+			 const struct net_device *dev,
+			 __u32 hash_rnd)
+{
+	return jhash_2words(*(__u16 *)pkey, 0, hash_rnd);
+}
+
 struct neigh_table dn_neigh_table = {
 	.family =			PF_DECnet,
 	.entry_size =			sizeof(struct dn_neigh),
@@ -121,11 +127,6 @@ struct neigh_table dn_neigh_table = {
 	.gc_thresh2 =			512,
 	.gc_thresh3 =			1024,
 };
-
-static u32 dn_neigh_hash(const void *pkey, const struct net_device *dev)
-{
-	return jhash_2words(*(__u16 *)pkey, 0, dn_neigh_table.hash_rnd);
-}
 
 static int dn_neigh_construct(struct neighbour *neigh)
 {
@@ -207,7 +208,7 @@ static int dn_neigh_output_packet(struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb_dst(skb);
 	struct dn_route *rt = (struct dn_route *)dst;
-	struct neighbour *neigh = dst->neighbour;
+	struct neighbour *neigh = dst_get_neighbour(dst);
 	struct net_device *dev = neigh->dev;
 	char mac_addr[ETH_ALEN];
 
@@ -226,7 +227,7 @@ static int dn_neigh_output_packet(struct sk_buff *skb)
 static int dn_long_output(struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb_dst(skb);
-	struct neighbour *neigh = dst->neighbour;
+	struct neighbour *neigh = dst_get_neighbour(dst);
 	struct net_device *dev = neigh->dev;
 	int headroom = dev->hard_header_len + sizeof(struct dn_long_packet) + 3;
 	unsigned char *data;
@@ -273,7 +274,7 @@ static int dn_long_output(struct sk_buff *skb)
 static int dn_short_output(struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb_dst(skb);
-	struct neighbour *neigh = dst->neighbour;
+	struct neighbour *neigh = dst_get_neighbour(dst);
 	struct net_device *dev = neigh->dev;
 	int headroom = dev->hard_header_len + sizeof(struct dn_short_packet) + 2;
 	struct dn_short_packet *sp;
@@ -317,7 +318,7 @@ static int dn_short_output(struct sk_buff *skb)
 static int dn_phase3_output(struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb_dst(skb);
-	struct neighbour *neigh = dst->neighbour;
+	struct neighbour *neigh = dst_get_neighbour(dst);
 	struct net_device *dev = neigh->dev;
 	int headroom = dev->hard_header_len + sizeof(struct dn_short_packet) + 2;
 	struct dn_short_packet *sp;
@@ -390,7 +391,7 @@ int dn_neigh_router_hello(struct sk_buff *skb)
 		write_lock(&neigh->lock);
 
 		neigh->used = jiffies;
-		dn_db = (struct dn_dev *)neigh->dev->dn_ptr;
+		dn_db = rcu_dereference(neigh->dev->dn_ptr);
 
 		if (!(neigh->nud_state & NUD_PERMANENT)) {
 			neigh->updated = jiffies;

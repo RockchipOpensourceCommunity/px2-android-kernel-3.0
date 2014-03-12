@@ -53,6 +53,7 @@ static int linear_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	}
 
 	ti->num_flush_requests = 1;
+	ti->num_discard_requests = 1;
 	ti->private = lc;
 	return 0;
 
@@ -73,7 +74,7 @@ static sector_t linear_map_sector(struct dm_target *ti, sector_t bi_sector)
 {
 	struct linear_c *lc = ti->private;
 
-	return lc->start + (bi_sector - ti->begin);
+	return lc->start + dm_target_offset(ti, bi_sector);
 }
 
 static void linear_map_bio(struct dm_target *ti, struct bio *bio)
@@ -115,7 +116,17 @@ static int linear_ioctl(struct dm_target *ti, unsigned int cmd,
 			unsigned long arg)
 {
 	struct linear_c *lc = (struct linear_c *) ti->private;
-	return __blkdev_driver_ioctl(lc->dev->bdev, lc->dev->mode, cmd, arg);
+	struct dm_dev *dev = lc->dev;
+	int r = 0;
+
+	/*
+	 * Only pass ioctls through if the device sizes match exactly.
+	 */
+	if (lc->start ||
+	    ti->len != i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT)
+		r = scsi_verify_blk_ioctl(NULL, cmd);
+
+	return r ? : __blkdev_driver_ioctl(dev->bdev, dev->mode, cmd, arg);
 }
 
 static int linear_merge(struct dm_target *ti, struct bvec_merge_data *bvm,

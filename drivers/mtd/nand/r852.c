@@ -64,8 +64,8 @@ static inline void r852_write_reg_dword(struct r852_device *dev,
 /* returns pointer to our private structure */
 static inline struct r852_device *r852_get_dev(struct mtd_info *mtd)
 {
-	struct nand_chip *chip = (struct nand_chip *)mtd->priv;
-	return (struct r852_device *)chip->priv;
+	struct nand_chip *chip = mtd->priv;
+	return chip->priv;
 }
 
 
@@ -150,7 +150,6 @@ static void r852_dma_done(struct r852_device *dev, int error)
 	if (dev->phys_dma_addr && dev->phys_dma_addr != dev->phys_bounce_buffer)
 		pci_unmap_single(dev->pci_dev, dev->phys_dma_addr, R852_DMA_LEN,
 			dev->dma_dir ? PCI_DMA_FROMDEVICE : PCI_DMA_TODEVICE);
-	complete(&dev->dma_done);
 }
 
 /*
@@ -182,10 +181,11 @@ static void r852_do_dma(struct r852_device *dev, uint8_t *buf, int do_read)
 	/* Set dma direction */
 	dev->dma_dir = do_read;
 	dev->dma_stage = 1;
+	INIT_COMPLETION(dev->dma_done);
 
 	dbg_verbose("doing dma %s ", do_read ? "read" : "write");
 
-	/* Set intial dma state: for reading first fill on board buffer,
+	/* Set initial dma state: for reading first fill on board buffer,
 	  from device, for writes first fill the buffer  from memory*/
 	dev->dma_state = do_read ? DMA_INTERNAL : DMA_MEMORY;
 
@@ -380,7 +380,7 @@ void r852_cmdctl(struct mtd_info *mtd, int dat, unsigned int ctrl)
  */
 int r852_wait(struct mtd_info *mtd, struct nand_chip *chip)
 {
-	struct r852_device *dev = (struct r852_device *)chip->priv;
+	struct r852_device *dev = chip->priv;
 
 	unsigned long timeout;
 	int status;
@@ -493,6 +493,11 @@ int r852_ecc_correct(struct mtd_info *mtd, uint8_t *dat,
 
 	if (dev->card_unstable)
 		return 0;
+
+	if (dev->dma_error) {
+		dev->dma_error = 0;
+		return -1;
+	}
 
 	r852_write_reg(dev, R852_CTL, dev->ctlreg | R852_CTL_ECC_ACCESS);
 	ecc_reg = r852_read_reg_dword(dev, R852_DATALINE);
@@ -707,6 +712,7 @@ void r852_card_detect_work(struct work_struct *work)
 		container_of(work, struct r852_device, card_detect_work.work);
 
 	r852_card_update_present(dev);
+	r852_update_card_detect(dev);
 	dev->card_unstable = 0;
 
 	/* False alarm */
@@ -722,7 +728,6 @@ void r852_card_detect_work(struct work_struct *work)
 	else
 		r852_unregister_nand_device(dev);
 exit:
-	/* Update detection logic */
 	r852_update_card_detect(dev);
 }
 
@@ -752,11 +757,6 @@ static irqreturn_t r852_irq(int irq, void *data)
 
 	spin_lock_irqsave(&dev->irqlock, flags);
 
-	/* We can recieve shared interrupt while pci is suspended
-		in that case reads will return 0xFFFFFFFF.... */
-	if (dev->insuspend)
-		goto out;
-
 	/* handle card detection interrupts first */
 	card_status = r852_read_reg(dev, R852_CARD_IRQ_STA);
 	r852_write_reg(dev, R852_CARD_IRQ_STA, card_status);
@@ -766,7 +766,7 @@ static irqreturn_t r852_irq(int irq, void *data)
 		ret = IRQ_HANDLED;
 		dev->card_detected = !!(card_status & R852_CARD_IRQ_INSERT);
 
-		/* we shouldn't recieve any interrupts if we wait for card
+		/* we shouldn't receive any interrupts if we wait for card
 			to settle */
 		WARN_ON(dev->card_unstable);
 
@@ -794,12 +794,13 @@ static irqreturn_t r852_irq(int irq, void *data)
 		ret = IRQ_HANDLED;
 
 		if (dma_status & R852_DMA_IRQ_ERROR) {
-			dbg("recieved dma error IRQ");
+			dbg("received dma error IRQ");
 			r852_dma_done(dev, -EIO);
+			complete(&dev->dma_done);
 			goto out;
 		}
 
-		/* recieved DMA interrupt out of nowhere? */
+		/* received DMA interrupt out of nowhere? */
 		WARN_ON_ONCE(dev->dma_stage == 0);
 
 		if (dev->dma_stage == 0)
@@ -825,8 +826,10 @@ static irqreturn_t r852_irq(int irq, void *data)
 			r852_dma_enable(dev);
 
 		/* Operation done */
-		if (dev->dma_stage == 3)
+		if (dev->dma_stage == 3) {
 			r852_dma_done(dev, 0);
+			complete(&dev->dma_done);
+		}
 		goto out;
 	}
 
@@ -927,7 +930,7 @@ int  r852_probe(struct pci_dev *pci_dev, const struct pci_device_id *id)
 
 	init_completion(&dev->dma_done);
 
-	dev->card_workqueue = create_freezeable_workqueue(DRV_NAME);
+	dev->card_workqueue = create_freezable_workqueue(DRV_NAME);
 
 	if (!dev->card_workqueue)
 		goto error9;
@@ -940,23 +943,24 @@ int  r852_probe(struct pci_dev *pci_dev, const struct pci_device_id *id)
 
 	r852_dma_test(dev);
 
+	dev->irq = pci_dev->irq;
+	spin_lock_init(&dev->irqlock);
+
+	dev->card_detected = 0;
+	r852_card_update_present(dev);
+
 	/*register irq handler*/
 	error = -ENODEV;
 	if (request_irq(pci_dev->irq, &r852_irq, IRQF_SHARED,
 			  DRV_NAME, dev))
 		goto error10;
 
-	dev->irq = pci_dev->irq;
-	spin_lock_init(&dev->irqlock);
-
 	/* kick initial present test */
-	dev->card_detected = 0;
-	r852_card_update_present(dev);
 	queue_delayed_work(dev->card_workqueue,
 		&dev->card_detect_work, 0);
 
 
-	printk(KERN_NOTICE DRV_NAME ": driver loaded succesfully\n");
+	printk(KERN_NOTICE DRV_NAME ": driver loaded successfully\n");
 	return 0;
 
 error10:
@@ -1026,7 +1030,6 @@ void r852_shutdown(struct pci_dev *pci_dev)
 int r852_suspend(struct device *device)
 {
 	struct r852_device *dev = pci_get_drvdata(to_pci_dev(device));
-	unsigned long flags;
 
 	if (dev->ctlreg & R852_CTL_CARDENABLE)
 		return -EBUSY;
@@ -1038,41 +1041,20 @@ int r852_suspend(struct device *device)
 	r852_disable_irqs(dev);
 	r852_engine_disable(dev);
 
-	spin_lock_irqsave(&dev->irqlock, flags);
-	dev->insuspend = 1;
-	spin_unlock_irqrestore(&dev->irqlock, flags);
-
-	/* At that point, even if interrupt handler is running, it will quit */
-	/* So wait for this to happen explictly */
-	synchronize_irq(dev->irq);
-
 	/* If card was pulled off just during the suspend, which is very
 		unlikely, we will remove it on resume, it too late now
 		anyway... */
 	dev->card_unstable = 0;
-
-	pci_save_state(to_pci_dev(device));
-	return pci_prepare_to_sleep(to_pci_dev(device));
+	return 0;
 }
 
 int r852_resume(struct device *device)
 {
 	struct r852_device *dev = pci_get_drvdata(to_pci_dev(device));
-	unsigned long flags;
-
-	/* Turn on the hardware */
-	pci_back_from_sleep(to_pci_dev(device));
-	pci_restore_state(to_pci_dev(device));
 
 	r852_disable_irqs(dev);
 	r852_card_update_present(dev);
 	r852_engine_disable(dev);
-
-
-	/* Now its safe for IRQ to run */
-	spin_lock_irqsave(&dev->irqlock, flags);
-	dev->insuspend = 0;
-	spin_unlock_irqrestore(&dev->irqlock, flags);
 
 
 	/* If card status changed, just do the work */
@@ -1081,7 +1063,7 @@ int r852_resume(struct device *device)
 			dev->card_detected ? "added" : "removed");
 
 		queue_delayed_work(dev->card_workqueue,
-		&dev->card_detect_work, 1000);
+		&dev->card_detect_work, msecs_to_jiffies(1000));
 		return 0;
 	}
 
@@ -1111,7 +1093,6 @@ static const struct pci_device_id r852_pci_id_tbl[] = {
 MODULE_DEVICE_TABLE(pci, r852_pci_id_tbl);
 
 SIMPLE_DEV_PM_OPS(r852_pm_ops, r852_suspend, r852_resume);
-
 
 static struct pci_driver r852_pci_driver = {
 	.name		= DRV_NAME,

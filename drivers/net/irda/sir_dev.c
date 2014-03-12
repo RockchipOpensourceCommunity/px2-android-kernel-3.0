@@ -221,7 +221,7 @@ static void sirdev_config_fsm(struct work_struct *work)
 			break;
 
 		case SIRDEV_STATE_DONGLE_SPEED:
-			if (dev->dongle_drv->reset) {
+			if (dev->dongle_drv->set_speed) {
 				ret = dev->dongle_drv->set_speed(dev, fsm->param);
 				if (ret < 0) {
 					fsm->result = ret;
@@ -336,7 +336,7 @@ static int sirdev_is_receiving(struct sir_dev *dev)
 	if (!atomic_read(&dev->enable_rx))
 		return 0;
 
-	return (dev->rx_buff.state != OUTSIDE_FRAME);
+	return dev->rx_buff.state != OUTSIDE_FRAME;
 }
 
 int sirdev_set_dongle(struct sir_dev *dev, IRDA_DONGLE type)
@@ -909,7 +909,7 @@ struct sir_dev * sirdev_get_instance(const struct sir_driver *drv, const char *n
 	dev->tx_skb = NULL;
 
 	spin_lock_init(&dev->tx_lock);
-	init_MUTEX(&dev->fsm.sem);
+	sema_init(&dev->fsm.sem, 1);
 
 	dev->drv = drv;
 	dev->netdev = ndev;

@@ -135,7 +135,10 @@ struct pppol2tp_session {
 
 static int pppol2tp_xmit(struct ppp_channel *chan, struct sk_buff *skb);
 
-static struct ppp_channel_ops pppol2tp_chan_ops = { pppol2tp_xmit , NULL };
+static const struct ppp_channel_ops pppol2tp_chan_ops = {
+	.start_xmit =  pppol2tp_xmit,
+};
+
 static const struct proto_ops pppol2tp_ops;
 
 /* Helpers to obtain tunnel/session contexts from sockets.
@@ -905,7 +908,7 @@ static int pppol2tp_getname(struct socket *sock, struct sockaddr *uaddr,
 		goto end_put_sess;
 	}
 
-	inet = inet_sk(sk);
+	inet = inet_sk(tunnel->sock);
 	if (tunnel->version == 2) {
 		struct sockaddr_pppol2tp sp;
 		len = sizeof(sp);
@@ -1765,7 +1768,7 @@ static const struct proto_ops pppol2tp_ops = {
 	.ioctl		= pppox_ioctl,
 };
 
-static struct pppox_proto pppol2tp_proto = {
+static const struct pppox_proto pppol2tp_proto = {
 	.create		= pppol2tp_create,
 	.ioctl		= pppol2tp_ioctl
 };

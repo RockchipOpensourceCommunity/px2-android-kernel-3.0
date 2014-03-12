@@ -48,9 +48,9 @@ static void delay_loop(unsigned long loops)
 }
 
 /* TSC based delay: */
-static void delay_tsc(unsigned long loops)
+static void delay_tsc(unsigned long __loops)
 {
-	unsigned long bclock, now;
+	u32 bclock, now, loops = __loops;
 	int cpu;
 
 	preempt_disable();
@@ -121,7 +121,7 @@ inline void __const_udelay(unsigned long xloops)
 	asm("mull %%edx"
 		:"=d" (xloops), "=&a" (d0)
 		:"1" (xloops), "0"
-		(cpu_data(raw_smp_processor_id()).loops_per_jiffy * (HZ/4)));
+		(this_cpu_read(cpu_info.loops_per_jiffy) * (HZ/4)));
 
 	__delay(++xloops);
 }

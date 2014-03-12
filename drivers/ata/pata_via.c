@@ -124,6 +124,17 @@ static const struct via_isa_bridge {
 	{ NULL }
 };
 
+static const struct dmi_system_id no_atapi_dma_dmi_table[] = {
+	{
+		.ident = "AVERATEC 3200",
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "AVERATEC"),
+			DMI_MATCH(DMI_BOARD_NAME, "3200"),
+		},
+	},
+	{ }
+};
+
 struct via_port {
 	u8 cached_device;
 };
@@ -355,6 +366,13 @@ static unsigned long via_mode_filter(struct ata_device *dev, unsigned long mask)
 			mask &= ~ ATA_MASK_UDMA;
 		}
 	}
+
+	if (dev->class == ATA_DEV_ATAPI &&
+	    dmi_check_system(no_atapi_dma_dmi_table)) {
+		ata_dev_printk(dev, KERN_WARNING, "controller locks up on ATAPI DMA, forcing PIO\n");
+		mask &= ATA_MASK_PIO;
+	}
+
 	return mask;
 }
 
@@ -417,6 +435,8 @@ static void via_tf_load(struct ata_port *ap, const struct ata_taskfile *tf)
 			tf->lbam,
 			tf->lbah);
 	}
+
+	ata_wait_idle(ap);
 }
 
 static int via_port_start(struct ata_port *ap)

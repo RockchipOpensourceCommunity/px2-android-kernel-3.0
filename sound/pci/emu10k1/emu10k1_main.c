@@ -926,7 +926,7 @@ static int snd_emu10k1_emu1010_init(struct snd_emu10k1 *emu)
 	snd_emu1010_fpga_write(emu, EMU_HANA_MIDI_IN, 0x19);
 	/* Unknown. */
 	snd_emu1010_fpga_write(emu, EMU_HANA_MIDI_OUT, 0x0c);
-	/* IRQ Enable: Alll on */
+	/* IRQ Enable: All on */
 	/* snd_emu1010_fpga_write(emu, 0x09, 0x0f ); */
 	/* IRQ Enable: All off */
 	snd_emu1010_fpga_write(emu, EMU_HANA_IRQ_ENABLE, 0x00);
@@ -1415,6 +1415,15 @@ static struct snd_emu_chip_details emu_chip_details[] = {
 	 .ca0108_chip = 1,
 	 .spk71 = 1,
 	 .emu_model = EMU_MODEL_EMU1010B}, /* EMU 1010 new revision */
+	/* Tested by Maxim Kachur <mcdebugger@duganet.ru> 17th Oct 2012. */
+	/* This is MAEM8986, 0202 is MAEM8980 */
+	{.vendor = 0x1102, .device = 0x0008, .subsystem = 0x40071102,
+	 .driver = "Audigy2", .name = "E-mu 1010 PCIe [MAEM8986]",
+	 .id = "EMU1010",
+	 .emu10k2_chip = 1,
+	 .ca0108_chip = 1,
+	 .spk71 = 1,
+	 .emu_model = EMU_MODEL_EMU1010B}, /* EMU 1010 PCIe */
 	/* Tested by James@superbug.co.uk 8th July 2005. */
 	/* This is MAEM8810, 0202 is MAEM8820 */
 	{.vendor = 0x1102, .device = 0x0004, .subsystem = 0x40011102,
@@ -1440,6 +1449,14 @@ static struct snd_emu_chip_details emu_chip_details[] = {
 	 .ca0102_chip = 1,
 	 .spk71 = 1,
 	 .emu_model = EMU_MODEL_EMU0404}, /* EMU 0404 */
+	/* EMU0404 PCIe */
+	{.vendor = 0x1102, .device = 0x0008, .subsystem = 0x40051102,
+	 .driver = "Audigy2", .name = "E-mu 0404 PCIe [MAEM8984]",
+	 .id = "EMU0404",
+	 .emu10k2_chip = 1,
+	 .ca0108_chip = 1,
+	 .spk71 = 1,
+	 .emu_model = EMU_MODEL_EMU0404}, /* EMU 0404 PCIe ver_03 */
 	/* Note that all E-mu cards require kernel 2.6 or newer. */
 	{.vendor = 0x1102, .device = 0x0008,
 	 .driver = "Audigy2", .name = "SB Audigy 2 Value [Unknown]",

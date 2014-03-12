@@ -346,14 +346,19 @@ static void pn_rx_complete(struct usb_ep *ep, struct usb_request *req)
 
 		if (unlikely(!skb))
 			break;
-		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page, 0,
-				req->actual);
+
+		if (skb->len == 0) { /* First fragment */
+			skb->protocol = htons(ETH_P_PHONET);
+			skb_reset_mac_header(skb);
+			/* Can't use pskb_pull() on page in IRQ */
+			memcpy(skb_put(skb, 1), page_address(page), 1);
+		}
+
+		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
+				skb->len == 0, req->actual);
 		page = NULL;
 
 		if (req->actual < req->length) { /* Last fragment */
-			skb->protocol = htons(ETH_P_PHONET);
-			skb_reset_mac_header(skb);
-			pskb_pull(skb, 1);
 			skb->dev = dev;
 			dev->stats.rx_packets++;
 			dev->stats.rx_bytes += skb->len;
@@ -536,7 +541,7 @@ int pn_bind(struct usb_configuration *c, struct usb_function *f)
 
 		req = usb_ep_alloc_request(fp->out_ep, GFP_KERNEL);
 		if (!req)
-			goto err;
+			goto err_req;
 
 		req->complete = pn_rx_complete;
 		fp->out_reqv[i] = req;
@@ -545,14 +550,18 @@ int pn_bind(struct usb_configuration *c, struct usb_function *f)
 	/* Outgoing USB requests */
 	fp->in_req = usb_ep_alloc_request(fp->in_ep, GFP_KERNEL);
 	if (!fp->in_req)
-		goto err;
+		goto err_req;
 
 	INFO(cdev, "USB CDC Phonet function\n");
 	INFO(cdev, "using %s, OUT %s, IN %s\n", cdev->gadget->name,
 		fp->out_ep->name, fp->in_ep->name);
 	return 0;
 
+err_req:
+	for (i = 0; i < phonet_rxq_size && fp->out_reqv[i]; i++)
+		usb_ep_free_request(fp->out_ep, fp->out_reqv[i]);
 err:
+
 	if (fp->out_ep)
 		fp->out_ep->driver_data = NULL;
 	if (fp->in_ep)

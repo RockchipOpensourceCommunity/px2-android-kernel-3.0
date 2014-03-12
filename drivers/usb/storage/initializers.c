@@ -92,8 +92,8 @@ int usb_stor_ucr61s2b_init(struct us_data *us)
 	return 0;
 }
 
-/* This places the HUAWEI E220 devices in multi-port mode */
-int usb_stor_huawei_e220_init(struct us_data *us)
+/* This places the HUAWEI usb dongles in multi-port mode */
+static int usb_stor_huawei_feature_init(struct us_data *us)
 {
 	int result;
 
@@ -104,3 +104,117 @@ int usb_stor_huawei_e220_init(struct us_data *us)
 	US_DEBUGP("Huawei mode set result is %d\n", result);
 	return 0;
 }
+
+/*
+ * It will send a scsi switch command called rewind' to huawei dongle.
+ * When the dongle receives this command at the first time,
+ * it will reboot immediately. After rebooted, it will ignore this command.
+ * So it is  unnecessary to read its response.
+ */
+static int usb_stor_huawei_scsi_init(struct us_data *us)
+{   
+    int idProduct;
+	idProduct = us->pusb_dev->descriptor.idProduct;
+	if(idProduct==0x1F01){
+	//printk("This is SCSI HUAWEI HILINK Dongle\n");
+	int result = 0;
+    int act_len = 0;
+	unsigned  char  cmd[32] =  {0x55,  0x53, 0x42,  0x43,  0x00, 0x00,  0x00, 0x00,
+	                            0x00,  0x00, 0x00,  0x00,  0x00,  0x00,  0x00, 0x11,
+	                            0x06,  0x30, 0x00,  0x00,  0x01,  0x00,  0x01, 0x00,
+	                            0x00,  0x00, 0x00,  0x00,  0x00,  0x00, 0x00};
+	 result = usb_stor_bulk_transfer_buf (us, us->send_bulk_pipe, cmd, 31, &act_len);
+	 printk("usb_stor_bulk_transfer_buf performing result is %d, transfer the actual length=%d\n", result, act_len);
+	 return result;
+	}else{
+	int result = 0;
+	int act_len = 0;
+	struct bulk_cb_wrap *bcbw = (struct bulk_cb_wrap *) us->iobuf;
+	char rewind_cmd[] = {0x11, 0x06, 0x20, 0x00, 0x00, 0x01, 0x01, 0x00,
+			0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+	bcbw->Signature = cpu_to_le32(US_BULK_CB_SIGN);
+	bcbw->Tag = 0;
+	bcbw->DataTransferLength = 0;
+	bcbw->Flags = bcbw->Lun = 0;
+	bcbw->Length = sizeof(rewind_cmd);
+	memset(bcbw->CDB, 0, sizeof(bcbw->CDB));
+	memcpy(bcbw->CDB, rewind_cmd, sizeof(rewind_cmd));
+
+	result = usb_stor_bulk_transfer_buf(us, us->send_bulk_pipe, bcbw,
+					US_BULK_CB_WRAP_LEN, &act_len);
+	US_DEBUGP("transfer actual length=%d, result=%d\n", act_len, result);
+	return result;
+	}
+}
+
+/*
+ * It tries to find the supported Huawei USB dongles.
+ * In Huawei, they assign the following product IDs
+ * for all of their mobile broadband dongles,
+ * including the new dongles in the future.
+ * So if the product ID is not included in this list,
+ * it means it is not Huawei's mobile broadband dongles.
+ */
+static int usb_stor_huawei_dongles_pid(struct us_data *us)
+{
+	struct usb_interface_descriptor *idesc;
+	int idProduct;
+
+	idesc = &us->pusb_intf->cur_altsetting->desc;
+	idProduct = us->pusb_dev->descriptor.idProduct;
+	/* The first port is CDROM,
+	 * means the dongle in the single port mode,
+	 * and a switch command is required to be sent. */
+	if (idesc && idesc->bInterfaceNumber == 0) {
+		if ((idProduct == 0x1001)
+			|| (idProduct == 0x1003)
+			|| (idProduct == 0x1004)
+			|| (idProduct >= 0x1401 && idProduct <= 0x1500)
+			|| (idProduct >= 0x1505 && idProduct <= 0x1600)
+			|| (idProduct >= 0x1c02 && idProduct <= 0x2202)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+int usb_stor_huawei_init(struct us_data *us)
+{
+	int result = 0;
+
+	if (usb_stor_huawei_dongles_pid(us)) {
+		if (us->pusb_dev->descriptor.idProduct >= 0x1446)
+			result = usb_stor_huawei_scsi_init(us);
+		else
+			result = usb_stor_huawei_feature_init(us);
+	}
+	return result;
+}
+
+int usb_stor_zte_k4505_init(struct us_data *us)
+ {
+		int result = 0;
+		int act_len = 0;
+		unsigned char cmd[32] = {
+				 0x55,0x53,0x42,0x43,0x12,0x34,0x56,0x78,
+				 0x00,0x00,0x00,0x00,0x00,0x00,0x06,0x1b,
+				 0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,
+				 0x00,0x00,0x00,0x00,0x00,0x00,0x00
+				 };
+		result = usb_stor_bulk_transfer_buf (us, us->send_bulk_pipe, cmd, 31,&act_len);
+	    printk("usb_stor_bulk_transfer_buf performing result is %d, transfer the actual length=%d\n", result, act_len);
+		return (result ? 0 : -ENODEV);
+}
+
+int usb_stor_zte_init(struct us_data *us)
+{
+	     int result;
+		 result =usb_stor_control_msg(us,us->send_ctrl_pipe,
+		                                     0xA1,
+		                                     0xC0,
+		                                     0x01,0x0,NULL,0x0,1000);
+		 printk("usb_stor_zte_int result is %d\n",result);
+		 return 0;
+}
+

@@ -28,9 +28,11 @@
 #include <linux/skbuff.h>
 #include <linux/delay.h>
 #include <linux/spi/spi.h>
+#include <mach/gpio.h>
 
 #include "enc28j60_hw.h"
 
+#define MAC_INT_PORT	RK2818_PIN_PE2
 #define DRV_NAME	"enc28j60"
 #define DRV_VERSION	"1.01"
 
@@ -812,7 +814,7 @@ static void enc28j60_read_tsv(struct enc28j60_net *priv, u8 tsv[TSV_SIZE])
 	if (netif_msg_hw(priv))
 		printk(KERN_DEBUG DRV_NAME ": reading TSV at addr:0x%04x\n",
 			 endptr + 1);
-	enc28j60_mem_read(priv, endptr + 1, sizeof(tsv), tsv);
+	enc28j60_mem_read(priv, endptr + 1, TSV_SIZE, tsv);
 }
 
 static void enc28j60_dump_tsv(struct enc28j60_net *priv, const char *msg,
@@ -1488,7 +1490,7 @@ enc28j60_get_settings(struct net_device *dev, struct ethtool_cmd *cmd)
 	cmd->supported	= SUPPORTED_10baseT_Half
 			| SUPPORTED_10baseT_Full
 			| SUPPORTED_TP;
-	cmd->speed	= SPEED_10;
+	ethtool_cmd_speed_set(cmd,  SPEED_10);
 	cmd->duplex	= priv->full_duplex ? DUPLEX_FULL : DUPLEX_HALF;
 	cmd->port	= PORT_TP;
 	cmd->autoneg	= AUTONEG_DISABLE;
@@ -1499,7 +1501,8 @@ enc28j60_get_settings(struct net_device *dev, struct ethtool_cmd *cmd)
 static int
 enc28j60_set_settings(struct net_device *dev, struct ethtool_cmd *cmd)
 {
-	return enc28j60_setlink(dev, cmd->autoneg, cmd->speed, cmd->duplex);
+	return enc28j60_setlink(dev, cmd->autoneg,
+				ethtool_cmd_speed(cmd), cmd->duplex);
 }
 
 static u32 enc28j60_get_msglevel(struct net_device *dev)
@@ -1545,7 +1548,10 @@ static int __devinit enc28j60_probe(struct spi_device *spi)
 	struct net_device *dev;
 	struct enc28j60_net *priv;
 	int ret = 0;
-
+	unsigned long req_flags = IRQF_TRIGGER_FALLING;
+	int gpioToIrq = gpio_to_irq (MAC_INT_PORT);
+	
+	gpio_request(MAC_INT_PORT, "DRV_NAME");
 	if (netif_msg_drv(&debug))
 		dev_info(&spi->dev, DRV_NAME " Ethernet driver %s loaded\n",
 			DRV_VERSION);
@@ -1584,7 +1590,13 @@ static int __devinit enc28j60_probe(struct spi_device *spi)
 	/* Board setup must set the relevant edge trigger type;
 	 * level triggers won't currently work.
 	 */
-	ret = request_irq(spi->irq, enc28j60_irq, 0, DRV_NAME, priv);
+	gpio_pull_updown(MAC_INT_PORT, GPIOPullUp);	
+	if(gpioToIrq != -1)
+		ret = request_irq(gpioToIrq, enc28j60_irq,req_flags, "DRV_NAME", priv);
+	else
+		ret = -1;
+		
+	///ret = request_irq(spi->irq, enc28j60_irq, 0, DRV_NAME, priv);
 	if (ret < 0) {
 		if (netif_msg_probe(priv))
 			dev_err(&spi->dev, DRV_NAME ": request irq %d failed "

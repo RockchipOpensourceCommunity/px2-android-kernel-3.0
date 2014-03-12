@@ -26,9 +26,6 @@
 unsigned int hynet_enable = 0xffffffff; 
 module_param(hynet_enable, uint, 0);
 
-/* store the actual version for log reporting */
-char *hysdn_net_revision = "$Revision: 1.8.6.4 $";
-
 #define MAX_SKB_BUFFERS 20	/* number of buffers for keeping TX-data */
 
 /****************************************************************************/
@@ -187,12 +184,13 @@ void
 hysdn_rx_netpkt(hysdn_card * card, unsigned char *buf, unsigned short len)
 {
 	struct net_local *lp = card->netif;
-	struct net_device *dev = lp->dev;
+	struct net_device *dev;
 	struct sk_buff *skb;
 
 	if (!lp)
 		return;		/* non existing device */
 
+	dev = lp->dev;
 	dev->stats.rx_bytes += len;
 
 	skb = dev_alloc_skb(len);

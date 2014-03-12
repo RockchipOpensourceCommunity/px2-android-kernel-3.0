@@ -44,6 +44,9 @@
  *  Specific support is included for the ht6560a/ht6560b/opti82c611a/
  *  opti82c465mv/promise 20230c/20630/qdi65x0/winbond83759A
  *
+ *  Support for the Winbond 83759A when operating in advanced mode.
+ *  Multichip mode is not currently supported.
+ *
  *  Use the autospeed and pio_mask options with:
  *	Appian ADI/2 aka CLPD7220 or AIC25VL01.
  *  Use the jumpers, autospeed and set pio_mask to the mode on the jumpers with
@@ -135,11 +138,17 @@ static int ht6560b;		/* HT 6560A on primary 1, second 2, both 3 */
 static int opti82c611a;		/* Opti82c611A on primary 1, sec 2, both 3 */
 static int opti82c46x;		/* Opti 82c465MV present(pri/sec autodetect) */
 static int qdi;			/* Set to probe QDI controllers */
-static int winbond;		/* Set to probe Winbond controllers,
-					give I/O port if non standard */
 static int autospeed;		/* Chip present which snoops speed changes */
 static int pio_mask = ATA_PIO4;	/* PIO range for autospeed devices */
 static int iordy_mask = 0xFFFFFFFF;	/* Use iordy if available */
+
+#ifdef CONFIG_PATA_WINBOND_VLB_MODULE
+static int winbond = 1;		/* Set to probe Winbond controllers,
+					give I/O port if non standard */
+#else
+static int winbond;		/* Set to probe Winbond controllers,
+					give I/O port if non standard */
+#endif
 
 /**
  *	legacy_probe_add	-	Add interface to probe list
@@ -387,8 +396,7 @@ static void ht6560b_set_piomode(struct ata_port *ap, struct ata_device *adev)
 	ata_timing_compute(adev, adev->pio_mode, &t, 20000, 1000);
 
 	active = clamp_val(t.active, 2, 15);
-	recover = clamp_val(t.recover, 2, 16);
-	recover &= 0x15;
+	recover = clamp_val(t.recover, 2, 16) & 0x0F;
 
 	inb(0x3E6);
 	inb(0x3E6);
@@ -1297,6 +1305,7 @@ MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("low-level driver for legacy ATA");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(DRV_VERSION);
+MODULE_ALIAS("pata_winbond");
 
 module_param(probe_all, int, 0);
 module_param(autospeed, int, 0);
@@ -1305,6 +1314,7 @@ module_param(ht6560b, int, 0);
 module_param(opti82c611a, int, 0);
 module_param(opti82c46x, int, 0);
 module_param(qdi, int, 0);
+module_param(winbond, int, 0);
 module_param(pio_mask, int, 0);
 module_param(iordy_mask, int, 0);
 

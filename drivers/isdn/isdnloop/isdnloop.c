@@ -16,7 +16,6 @@
 #include <linux/sched.h>
 #include "isdnloop.h"
 
-static char *revision = "$Revision: 1.11.6.7 $";
 static char *isdnloop_id = "loop0";
 
 MODULE_DESCRIPTION("ISDN4Linux: Pseudo Driver that simulates an ISDN card");
@@ -954,7 +953,7 @@ isdnloop_parse_cmd(isdnloop_card * card)
 /*
  * Put command-strings into the of the 'card'. In reality, execute them
  * right in place by calling isdnloop_parse_cmd(). Also copy every
- * command to the read message ringbuffer, preceeding it with a '>'.
+ * command to the read message ringbuffer, preceding it with a '>'.
  * These mesagges can be read at /dev/isdnctrl.
  *
  * Parameter:
@@ -1494,17 +1493,6 @@ isdnloop_addcard(char *id1)
 static int __init
 isdnloop_init(void)
 {
-	char *p;
-	char rev[10];
-
-	if ((p = strchr(revision, ':'))) {
-		strcpy(rev, p + 1);
-		p = strchr(rev, '$');
-		*p = 0;
-	} else
-		strcpy(rev, " ??? ");
-	printk(KERN_NOTICE "isdnloop-ISDN-driver Rev%s\n", rev);
-
 	if (isdnloop_id)
 		return (isdnloop_addcard(isdnloop_id));
 

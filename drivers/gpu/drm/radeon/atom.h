@@ -44,6 +44,7 @@
 #define ATOM_CMD_SETSCLK	0x0A
 #define ATOM_CMD_SETMCLK	0x0B
 #define ATOM_CMD_SETPCLK	0x0C
+#define ATOM_CMD_SPDFANCNTL	0x39
 
 #define ATOM_DATA_FWI_PTR	0xC
 #define ATOM_DATA_IIO_PTR	0x32
@@ -113,6 +114,8 @@ struct card_info {
 	struct drm_device *dev;
 	void (* reg_write)(struct card_info *, uint32_t, uint32_t);   /*  filled by driver */
         uint32_t (* reg_read)(struct card_info *, uint32_t);          /*  filled by driver */
+	void (* ioreg_write)(struct card_info *, uint32_t, uint32_t);   /*  filled by driver */
+        uint32_t (* ioreg_read)(struct card_info *, uint32_t);          /*  filled by driver */
 	void (* mc_write)(struct card_info *, uint32_t, uint32_t);   /*  filled by driver */
         uint32_t (* mc_read)(struct card_info *, uint32_t);          /*  filled by driver */
 	void (* pll_write)(struct card_info *, uint32_t, uint32_t);   /*  filled by driver */
@@ -135,6 +138,7 @@ struct atom_context {
 	int cs_equal, cs_above;
 	int io_mode;
 	uint32_t *scratch;
+	int scratch_size_bytes;
 };
 
 extern int atom_debug;

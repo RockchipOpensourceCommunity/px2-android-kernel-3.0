@@ -324,8 +324,6 @@ static void ah6_output_done(struct crypto_async_request *base, int err)
 #endif
 	}
 
-	err = ah->nexthdr;
-
 	kfree(AH_SKB_CB(skb)->tmp);
 	xfrm_output_resume(skb, err);
 }
@@ -409,7 +407,7 @@ static int ah6_output(struct xfrm_state *x, struct sk_buff *skb)
 
 	ah->reserved = 0;
 	ah->spi = x->id.spi;
-	ah->seq_no = htonl(XFRM_SKB_CB(skb)->seq.output);
+	ah->seq_no = htonl(XFRM_SKB_CB(skb)->seq.output.low);
 
 	sg_init_table(sg, nfrags);
 	skb_to_sgvec(skb, sg, 0, skb->len);
@@ -466,12 +464,12 @@ static void ah6_input_done(struct crypto_async_request *base, int err)
 	if (err)
 		goto out;
 
+	err = ah->nexthdr;
+
 	skb->network_header += ah_hlen;
 	memcpy(skb_network_header(skb), work_iph, hdr_len);
 	__skb_pull(skb, ah_hlen + hdr_len);
 	skb_set_transport_header(skb, -hdr_len);
-
-	err = ah->nexthdr;
 out:
 	kfree(AH_SKB_CB(skb)->tmp);
 	xfrm_input_resume(skb, err);
@@ -538,13 +536,15 @@ static int ah6_input(struct xfrm_state *x, struct sk_buff *skb)
 	if (!pskb_may_pull(skb, ah_hlen))
 		goto out;
 
-	ip6h = ipv6_hdr(skb);
-
-	skb_push(skb, hdr_len);
 
 	if ((err = skb_cow_data(skb, 0, &trailer)) < 0)
 		goto out;
 	nfrags = err;
+
+	ah = (struct ip_auth_hdr *)skb->data;
+	ip6h = ipv6_hdr(skb);
+
+	skb_push(skb, hdr_len);
 
 	work_iph = ah_alloc_tmp(ahash, nfrags, hdr_len + ahp->icv_trunc_len);
 	if (!work_iph)
@@ -581,8 +581,6 @@ static int ah6_input(struct xfrm_state *x, struct sk_buff *skb)
 		if (err == -EINPROGRESS)
 			goto out;
 
-		if (err == -EBUSY)
-			err = NET_XMIT_DROP;
 		goto out_free;
 	}
 

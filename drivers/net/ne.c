@@ -806,12 +806,15 @@ static int __init ne_drv_probe(struct platform_device *pdev)
 		dev->base_addr = res->start;
 		dev->irq = platform_get_irq(pdev, 0);
 	} else {
-		if (this_dev < 0 || this_dev >= MAX_NE_CARDS)
+		if (this_dev < 0 || this_dev >= MAX_NE_CARDS) {
+			free_netdev(dev);
 			return -EINVAL;
+		}
 		dev->base_addr = io[this_dev];
 		dev->irq = irq[this_dev];
 		dev->mem_end = bad[this_dev];
 	}
+	SET_NETDEV_DEV(dev, &pdev->dev);
 	err = do_ne_probe(dev);
 	if (err) {
 		free_netdev(dev);

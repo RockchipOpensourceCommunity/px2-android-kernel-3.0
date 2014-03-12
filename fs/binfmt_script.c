@@ -16,7 +16,8 @@
 
 static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
-	char *cp, *i_name, *i_arg;
+	const char *i_arg, *i_name;
+	char *cp;
 	struct file *file;
 	char interp[BINPRM_BUF_SIZE];
 	int retval;
@@ -81,7 +82,9 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	retval = copy_strings_kernel(1, &i_name, bprm);
 	if (retval) return retval; 
 	bprm->argc++;
-	bprm->interp = interp;
+	retval = bprm_change_interp(interp, bprm);
+	if (retval < 0)
+		return retval;
 
 	/*
 	 * OK, now restart the process with the interpreter's dentry.

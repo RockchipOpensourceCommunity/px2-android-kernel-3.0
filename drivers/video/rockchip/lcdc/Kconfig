@@ -1,0 +1,20 @@
+config LCDC_RKPX2
+        tristate "RKPX2 lcdc support"
+        depends on FB_ROCKCHIP && ARCH_RK30XX
+        help
+          Driver for RKPX2 lcdc .There are two lcd controllers on RKPX2
+
+config LCDC0_RKPX2
+        bool "lcdc0 support"
+        depends on LCDC_RKPX2
+        default y
+        help
+           Support RKPX2 lcdc0 if you say y here
+
+config LCDC1_RKPX2
+        bool "lcdc1 support"
+        depends on LCDC_RKPX2
+        default y if HDMI_RKPX2
+        help
+           Support RKPX2 lcdc1 if you say y here
+

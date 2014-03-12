@@ -44,7 +44,7 @@
  * @lock:
  * @ipi_debug_brk_mask:
  *
- * The HV mantains per SMT thread mappings of HV outlet to HV plug on
+ * The HV maintains per SMT thread mappings of HV outlet to HV plug on
  * behalf of the guest.  These mappings are implemented as 256 bit guest
  * supplied bitmaps indexed by plug number.  The addresses of the bitmaps
  * are registered with the HV through lv1_configure_irq_state_bitmap().
@@ -88,6 +88,7 @@ struct ps3_private {
 	struct ps3_bmp bmp __attribute__ ((aligned (PS3_BMP_MINALIGN)));
 	u64 ppe_id;
 	u64 thread_id;
+	unsigned long ipi_mask;
 };
 
 static DEFINE_PER_CPU(struct ps3_private, ps3_private);
@@ -99,16 +100,16 @@ static DEFINE_PER_CPU(struct ps3_private, ps3_private);
  * Sets ps3_bmp.mask and calls lv1_did_update_interrupt_mask().
  */
 
-static void ps3_chip_mask(unsigned int virq)
+static void ps3_chip_mask(struct irq_data *d)
 {
-	struct ps3_private *pd = get_irq_chip_data(virq);
+	struct ps3_private *pd = irq_data_get_irq_chip_data(d);
 	unsigned long flags;
 
 	pr_debug("%s:%d: thread_id %llu, virq %d\n", __func__, __LINE__,
-		pd->thread_id, virq);
+		pd->thread_id, d->irq);
 
 	local_irq_save(flags);
-	clear_bit(63 - virq, &pd->bmp.mask);
+	clear_bit(63 - d->irq, &pd->bmp.mask);
 	lv1_did_update_interrupt_mask(pd->ppe_id, pd->thread_id);
 	local_irq_restore(flags);
 }
@@ -120,16 +121,16 @@ static void ps3_chip_mask(unsigned int virq)
  * Clears ps3_bmp.mask and calls lv1_did_update_interrupt_mask().
  */
 
-static void ps3_chip_unmask(unsigned int virq)
+static void ps3_chip_unmask(struct irq_data *d)
 {
-	struct ps3_private *pd = get_irq_chip_data(virq);
+	struct ps3_private *pd = irq_data_get_irq_chip_data(d);
 	unsigned long flags;
 
 	pr_debug("%s:%d: thread_id %llu, virq %d\n", __func__, __LINE__,
-		pd->thread_id, virq);
+		pd->thread_id, d->irq);
 
 	local_irq_save(flags);
-	set_bit(63 - virq, &pd->bmp.mask);
+	set_bit(63 - d->irq, &pd->bmp.mask);
 	lv1_did_update_interrupt_mask(pd->ppe_id, pd->thread_id);
 	local_irq_restore(flags);
 }
@@ -141,10 +142,14 @@ static void ps3_chip_unmask(unsigned int virq)
  * Calls lv1_end_of_interrupt_ext().
  */
 
-static void ps3_chip_eoi(unsigned int virq)
+static void ps3_chip_eoi(struct irq_data *d)
 {
-	const struct ps3_private *pd = get_irq_chip_data(virq);
-	lv1_end_of_interrupt_ext(pd->ppe_id, pd->thread_id, virq);
+	const struct ps3_private *pd = irq_data_get_irq_chip_data(d);
+
+	/* non-IPIs are EOIed here. */
+
+	if (!test_bit(63 - d->irq, &pd->ipi_mask))
+		lv1_end_of_interrupt_ext(pd->ppe_id, pd->thread_id, d->irq);
 }
 
 /**
@@ -153,9 +158,9 @@ static void ps3_chip_eoi(unsigned int virq)
 
 static struct irq_chip ps3_irq_chip = {
 	.name = "ps3",
-	.mask = ps3_chip_mask,
-	.unmask = ps3_chip_unmask,
-	.eoi = ps3_chip_eoi,
+	.irq_mask = ps3_chip_mask,
+	.irq_unmask = ps3_chip_unmask,
+	.irq_eoi = ps3_chip_eoi,
 };
 
 /**
@@ -194,15 +199,15 @@ static int ps3_virq_setup(enum ps3_cpu_binding cpu, unsigned long outlet,
 	pr_debug("%s:%d: outlet %lu => cpu %u, virq %u\n", __func__, __LINE__,
 		outlet, cpu, *virq);
 
-	result = set_irq_chip_data(*virq, pd);
+	result = irq_set_chip_data(*virq, pd);
 
 	if (result) {
-		pr_debug("%s:%d: set_irq_chip_data failed\n",
+		pr_debug("%s:%d: irq_set_chip_data failed\n",
 			__func__, __LINE__);
 		goto fail_set;
 	}
 
-	ps3_chip_mask(*virq);
+	ps3_chip_mask(irq_get_irq_data(*virq));
 
 	return result;
 
@@ -221,12 +226,12 @@ fail_create:
 
 static int ps3_virq_destroy(unsigned int virq)
 {
-	const struct ps3_private *pd = get_irq_chip_data(virq);
+	const struct ps3_private *pd = irq_get_chip_data(virq);
 
 	pr_debug("%s:%d: ppe_id %llu, thread_id %llu, virq %u\n", __func__,
 		__LINE__, pd->ppe_id, pd->thread_id, virq);
 
-	set_irq_chip_data(virq, NULL);
+	irq_set_chip_data(virq, NULL);
 	irq_dispose_mapping(virq);
 
 	pr_debug("%s:%d <-\n", __func__, __LINE__);
@@ -256,7 +261,7 @@ int ps3_irq_plug_setup(enum ps3_cpu_binding cpu, unsigned long outlet,
 		goto fail_setup;
 	}
 
-	pd = get_irq_chip_data(*virq);
+	pd = irq_get_chip_data(*virq);
 
 	/* Binds outlet to cpu + virq. */
 
@@ -291,12 +296,12 @@ EXPORT_SYMBOL_GPL(ps3_irq_plug_setup);
 int ps3_irq_plug_destroy(unsigned int virq)
 {
 	int result;
-	const struct ps3_private *pd = get_irq_chip_data(virq);
+	const struct ps3_private *pd = irq_get_chip_data(virq);
 
 	pr_debug("%s:%d: ppe_id %llu, thread_id %llu, virq %u\n", __func__,
 		__LINE__, pd->ppe_id, pd->thread_id, virq);
 
-	ps3_chip_mask(virq);
+	ps3_chip_mask(irq_get_irq_data(virq));
 
 	result = lv1_disconnect_irq_plug_ext(pd->ppe_id, pd->thread_id, virq);
 
@@ -357,7 +362,7 @@ int ps3_event_receive_port_destroy(unsigned int virq)
 
 	pr_debug(" -> %s:%d virq %u\n", __func__, __LINE__, virq);
 
-	ps3_chip_mask(virq);
+	ps3_chip_mask(irq_get_irq_data(virq));
 
 	result = lv1_destruct_event_receive_port(virq_to_hw(virq));
 
@@ -492,7 +497,7 @@ int ps3_io_irq_destroy(unsigned int virq)
 	int result;
 	unsigned long outlet = virq_to_hw(virq);
 
-	ps3_chip_mask(virq);
+	ps3_chip_mask(irq_get_irq_data(virq));
 
 	/*
 	 * lv1_destruct_io_irq_outlet() will destroy the IRQ plug,
@@ -553,7 +558,7 @@ int ps3_vuart_irq_destroy(unsigned int virq)
 {
 	int result;
 
-	ps3_chip_mask(virq);
+	ps3_chip_mask(irq_get_irq_data(virq));
 	result = lv1_deconfigure_virtual_uart_irq();
 
 	if (result) {
@@ -605,7 +610,7 @@ int ps3_spe_irq_destroy(unsigned int virq)
 {
 	int result;
 
-	ps3_chip_mask(virq);
+	ps3_chip_mask(irq_get_irq_data(virq));
 
 	result = ps3_irq_plug_destroy(virq);
 	BUG_ON(result);
@@ -659,18 +664,13 @@ static void __maybe_unused _dump_mask(struct ps3_private *pd,
 static void dump_bmp(struct ps3_private* pd) {};
 #endif /* defined(DEBUG) */
 
-static void ps3_host_unmap(struct irq_host *h, unsigned int virq)
-{
-	set_irq_chip_data(virq, NULL);
-}
-
 static int ps3_host_map(struct irq_host *h, unsigned int virq,
 	irq_hw_number_t hwirq)
 {
 	pr_debug("%s:%d: hwirq %lu, virq %u\n", __func__, __LINE__, hwirq,
 		virq);
 
-	set_irq_chip_and_handler(virq, &ps3_irq_chip, handle_fasteoi_irq);
+	irq_set_chip_and_handler(virq, &ps3_irq_chip, handle_fasteoi_irq);
 
 	return 0;
 }
@@ -683,7 +683,6 @@ static int ps3_host_match(struct irq_host *h, struct device_node *np)
 
 static struct irq_host_ops ps3_host_ops = {
 	.map = ps3_host_map,
-	.unmap = ps3_host_unmap,
 	.match = ps3_host_match,
 };
 
@@ -695,6 +694,16 @@ void __init ps3_register_ipi_debug_brk(unsigned int cpu, unsigned int virq)
 
 	pr_debug("%s:%d: cpu %u, virq %u, mask %llxh\n", __func__, __LINE__,
 		cpu, virq, pd->bmp.ipi_debug_brk_mask);
+}
+
+void __init ps3_register_ipi_irq(unsigned int cpu, unsigned int virq)
+{
+	struct ps3_private *pd = &per_cpu(ps3_private, cpu);
+
+	set_bit(63 - virq, &pd->ipi_mask);
+
+	DBG("%s:%d: cpu %u, virq %u, ipi_mask %lxh\n", __func__, __LINE__,
+		cpu, virq, pd->ipi_mask);
 }
 
 static unsigned int ps3_get_irq(void)
@@ -726,6 +735,12 @@ static unsigned int ps3_get_irq(void)
 		BUG();
 	}
 #endif
+
+	/* IPIs are EOIed here. */
+
+	if (test_bit(63 - plug, &pd->ipi_mask))
+		lv1_end_of_interrupt_ext(pd->ppe_id, pd->thread_id, plug);
+
 	return plug;
 }
 

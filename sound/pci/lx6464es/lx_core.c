@@ -80,8 +80,12 @@ unsigned long lx_dsp_reg_read(struct lx6464es *chip, int port)
 
 void lx_dsp_reg_readbuf(struct lx6464es *chip, int port, u32 *data, u32 len)
 {
-	void __iomem *address = lx_dsp_register(chip, port);
-	memcpy_fromio(data, address, len*sizeof(u32));
+	u32 __iomem *address = lx_dsp_register(chip, port);
+	int i;
+
+	/* we cannot use memcpy_fromio */
+	for (i = 0; i != len; ++i)
+		data[i] = ioread32(address + i);
 }
 
 
@@ -94,8 +98,12 @@ void lx_dsp_reg_write(struct lx6464es *chip, int port, unsigned data)
 void lx_dsp_reg_writebuf(struct lx6464es *chip, int port, const u32 *data,
 			 u32 len)
 {
-	void __iomem *address = lx_dsp_register(chip, port);
-	memcpy_toio(address, data, len*sizeof(u32));
+	u32 __iomem *address = lx_dsp_register(chip, port);
+	int i;
+
+	/* we cannot use memcpy_to */
+	for (i = 0; i != len; ++i)
+		iowrite32(data[i], address + i);
 }
 
 
@@ -1152,7 +1160,7 @@ static int lx_interrupt_request_new_buffer(struct lx6464es *chip,
 					   struct lx_stream *lx_stream)
 {
 	struct snd_pcm_substream *substream = lx_stream->stream;
-	int is_capture = lx_stream->is_capture;
+	const unsigned int is_capture = lx_stream->is_capture;
 	int err;
 	unsigned long flags;
 

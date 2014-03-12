@@ -26,6 +26,7 @@ static inline void __dma_sync_page(unsigned long paddr, unsigned long offset,
 {
 	switch (direction) {
 	case DMA_TO_DEVICE:
+	case DMA_BIDIRECTIONAL:
 		flush_dcache_range(paddr + offset, paddr + offset + size);
 		break;
 	case DMA_FROM_DEVICE:
@@ -90,7 +91,6 @@ static int dma_direct_map_sg(struct device *dev, struct scatterlist *sgl,
 	/* FIXME this part of code is untested */
 	for_each_sg(sgl, sg, nents, i) {
 		sg->dma_address = sg_phys(sg) + get_dma_direct_offset(dev);
-		sg->dma_length = sg->length;
 		__dma_sync_page(page_to_phys(sg_page(sg)), sg->offset,
 							sg->length, direction);
 	}

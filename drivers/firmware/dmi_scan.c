@@ -2,9 +2,11 @@
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/ctype.h>
 #include <linux/dmi.h>
 #include <linux/efi.h>
 #include <linux/bootmem.h>
+#include <linux/random.h>
 #include <asm/dmi.h>
 
 /*
@@ -14,6 +16,7 @@
  */
 static char dmi_empty_string[] = "        ";
 
+static u16 __initdata dmi_ver;
 /*
  * Catch too early calls to dmi_check_system():
  */
@@ -110,16 +113,18 @@ static int __init dmi_walk_early(void (*decode)(const struct dmi_header *,
 
 	dmi_table(buf, dmi_len, dmi_num, decode, NULL);
 
+	add_device_randomness(buf, dmi_len);
+
 	dmi_iounmap(buf, dmi_len);
 	return 0;
 }
 
-static int __init dmi_checksum(const u8 *buf)
+static int __init dmi_checksum(const u8 *buf, u8 len)
 {
 	u8 sum = 0;
 	int a;
 
-	for (a = 0; a < 15; a++)
+	for (a = 0; a < len; a++)
 		sum += buf[a];
 
 	return sum == 0;
@@ -157,8 +162,10 @@ static void __init dmi_save_uuid(const struct dmi_header *dm, int slot, int inde
 		return;
 
 	for (i = 0; i < 16 && (is_ff || is_00); i++) {
-		if(d[i] != 0x00) is_ff = 0;
-		if(d[i] != 0xFF) is_00 = 0;
+		if (d[i] != 0x00)
+			is_00 = 0;
+		if (d[i] != 0xFF)
+			is_ff = 0;
 	}
 
 	if (is_ff || is_00)
@@ -168,7 +175,15 @@ static void __init dmi_save_uuid(const struct dmi_header *dm, int slot, int inde
 	if (!s)
 		return;
 
-	sprintf(s, "%pUB", d);
+	/*
+	 * As of version 2.6 of the SMBIOS specification, the first 3 fields of
+	 * the UUID are supposed to be little-endian encoded.  The specification
+	 * says that this is the defacto standard.
+	 */
+	if (dmi_ver >= 0x0206)
+		sprintf(s, "%pUL", d);
+	else
+		sprintf(s, "%pUB", d);
 
         dmi_ident[slot] = s;
 }
@@ -277,6 +292,29 @@ static void __init dmi_save_ipmi_device(const struct dmi_header *dm)
 	list_add_tail(&dev->list, &dmi_devices);
 }
 
+static void __init dmi_save_dev_onboard(int instance, int segment, int bus,
+					int devfn, const char *name)
+{
+	struct dmi_dev_onboard *onboard_dev;
+
+	onboard_dev = dmi_alloc(sizeof(*onboard_dev) + strlen(name) + 1);
+	if (!onboard_dev) {
+		printk(KERN_ERR "dmi_save_dev_onboard: out of memory.\n");
+		return;
+	}
+	onboard_dev->instance = instance;
+	onboard_dev->segment = segment;
+	onboard_dev->bus = bus;
+	onboard_dev->devfn = devfn;
+
+	strcpy((char *)&onboard_dev[1], name);
+	onboard_dev->dev.type = DMI_DEV_TYPE_DEV_ONBOARD;
+	onboard_dev->dev.name = (char *)&onboard_dev[1];
+	onboard_dev->dev.device_data = onboard_dev;
+
+	list_add(&onboard_dev->dev.list, &dmi_devices);
+}
+
 static void __init dmi_save_extended_devices(const struct dmi_header *dm)
 {
 	const u8 *d = (u8*) dm + 5;
@@ -285,6 +323,8 @@ static void __init dmi_save_extended_devices(const struct dmi_header *dm)
 	if ((*d & 0x80) == 0)
 		return;
 
+	dmi_save_dev_onboard(*(d+1), *(u16 *)(d+2), *(d+4), *(d+5),
+			     dmi_string_nosave(dm, *(d-1)));
 	dmi_save_one_device(*d & 0x7f, dmi_string_nosave(dm, *(d - 1)));
 }
 
@@ -336,30 +376,94 @@ static void __init dmi_decode(const struct dmi_header *dm, void *dummy)
 	}
 }
 
+static void __init print_filtered(const char *info)
+{
+	const char *p;
+
+	if (!info)
+		return;
+
+	for (p = info; *p; p++)
+		if (isprint(*p))
+			printk(KERN_CONT "%c", *p);
+		else
+			printk(KERN_CONT "\\x%02x", *p & 0xff);
+}
+
+static void __init dmi_dump_ids(void)
+{
+	const char *board;	/* Board Name is optional */
+
+	printk(KERN_DEBUG "DMI: ");
+	print_filtered(dmi_get_system_info(DMI_SYS_VENDOR));
+	printk(KERN_CONT " ");
+	print_filtered(dmi_get_system_info(DMI_PRODUCT_NAME));
+	board = dmi_get_system_info(DMI_BOARD_NAME);
+	if (board) {
+		printk(KERN_CONT "/");
+		print_filtered(board);
+	}
+	printk(KERN_CONT ", BIOS ");
+	print_filtered(dmi_get_system_info(DMI_BIOS_VERSION));
+	printk(KERN_CONT " ");
+	print_filtered(dmi_get_system_info(DMI_BIOS_DATE));
+	printk(KERN_CONT "\n");
+}
+
 static int __init dmi_present(const char __iomem *p)
 {
 	u8 buf[15];
 
 	memcpy_fromio(buf, p, 15);
-	if ((memcmp(buf, "_DMI_", 5) == 0) && dmi_checksum(buf)) {
+	if (dmi_checksum(buf, 15)) {
 		dmi_num = (buf[13] << 8) | buf[12];
 		dmi_len = (buf[7] << 8) | buf[6];
 		dmi_base = (buf[11] << 24) | (buf[10] << 16) |
 			(buf[9] << 8) | buf[8];
 
-		/*
-		 * DMI version 0.0 means that the real version is taken from
-		 * the SMBIOS version, which we don't know at this point.
-		 */
-		if (buf[14] != 0)
-			printk(KERN_INFO "DMI %d.%d present.\n",
-			       buf[14] >> 4, buf[14] & 0xF);
-		else
-			printk(KERN_INFO "DMI present.\n");
-		if (dmi_walk_early(dmi_decode) == 0)
+		if (dmi_walk_early(dmi_decode) == 0) {
+			if (dmi_ver)
+				pr_info("SMBIOS %d.%d present.\n",
+				       dmi_ver >> 8, dmi_ver & 0xFF);
+			else {
+				dmi_ver = (buf[14] & 0xF0) << 4 |
+					   (buf[14] & 0x0F);
+				pr_info("Legacy DMI %d.%d present.\n",
+				       dmi_ver >> 8, dmi_ver & 0xFF);
+			}
+			dmi_dump_ids();
 			return 0;
+		}
 	}
+	dmi_ver = 0;
 	return 1;
+}
+
+static int __init smbios_present(const char __iomem *p)
+{
+	u8 buf[32];
+	int offset = 0;
+
+	memcpy_fromio(buf, p, 32);
+	if ((buf[5] < 32) && dmi_checksum(buf, buf[5])) {
+		dmi_ver = (buf[6] << 8) + buf[7];
+
+		/* Some BIOS report weird SMBIOS version, fix that up */
+		switch (dmi_ver) {
+		case 0x021F:
+		case 0x0221:
+			pr_debug("SMBIOS version fixup(2.%d->2.%d)\n",
+			       dmi_ver & 0xFF, 3);
+			dmi_ver = 0x0203;
+			break;
+		case 0x0233:
+			pr_debug("SMBIOS version fixup(2.%d->2.%d)\n", 51, 6);
+			dmi_ver = 0x0206;
+			break;
+		}
+		offset = 16;
+	}
+	return dmi_present(buf + offset);
 }
 
 void __init dmi_scan_machine(void)
@@ -379,7 +483,7 @@ void __init dmi_scan_machine(void)
 		if (p == NULL)
 			goto error;
 
-		rc = dmi_present(p + 0x10); /* offset of _DMI_ string */
+		rc = smbios_present(p);
 		dmi_iounmap(p, 32);
 		if (!rc) {
 			dmi_available = 1;
@@ -397,7 +501,12 @@ void __init dmi_scan_machine(void)
 			goto error;
 
 		for (q = p; q < p + 0x10000; q += 16) {
-			rc = dmi_present(q);
+			if (memcmp(q, "_SM_", 4) == 0 && q - p <= 0xFFE0)
+				rc = smbios_present(q);
+			else if (memcmp(q, "_DMI_", 5) == 0)
+				rc = dmi_present(q);
+			else
+				continue;
 			if (!rc) {
 				dmi_available = 1;
 				dmi_iounmap(p, 0x10000);

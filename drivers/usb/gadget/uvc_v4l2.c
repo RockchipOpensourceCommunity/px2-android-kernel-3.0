@@ -41,7 +41,7 @@ uvc_send_response(struct uvc_device *uvc, struct uvc_request_data *data)
 	if (data->length < 0)
 		return usb_ep_set_halt(cdev->gadget->ep0);
 
-	req->length = min(uvc->event_length, data->length);
+	req->length = min_t(unsigned int, uvc->event_length, data->length);
 	req->zero = data->length < uvc->event_length;
 	req->dma = DMA_ADDR_INVALID;
 
@@ -94,7 +94,7 @@ uvc_v4l2_set_format(struct uvc_video *video, struct v4l2_format *fmt)
 			break;
 	}
 
-	if (format == NULL || format->fcc != fmt->fmt.pix.pixelformat) {
+	if (i == ARRAY_SIZE(uvc_formats)) {
 		printk(KERN_INFO "Unsupported format 0x%08x.\n",
 			fmt->fmt.pix.pixelformat);
 		return -EINVAL;
@@ -363,7 +363,7 @@ uvc_v4l2_poll(struct file *file, poll_table *wait)
 	return mask;
 }
 
-struct v4l2_file_operations uvc_v4l2_fops = {
+static struct v4l2_file_operations uvc_v4l2_fops = {
 	.owner		= THIS_MODULE,
 	.open		= uvc_v4l2_open,
 	.release	= uvc_v4l2_release,

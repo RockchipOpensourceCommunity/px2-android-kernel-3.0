@@ -137,13 +137,16 @@ int rndis_command(struct usbnet *dev, struct rndis_msg_hdr *buf, int buflen)
 
 	/* Some devices don't respond on the control channel until
 	 * polled on the status channel, so do that first. */
-	retval = usb_interrupt_msg(
-		dev->udev,
-		usb_rcvintpipe(dev->udev, dev->status->desc.bEndpointAddress),
-		&notification, sizeof(notification), &partial,
-		RNDIS_CONTROL_TIMEOUT_MS);
-	if (unlikely(retval < 0))
-		return retval;
+	if (dev->driver_info->data & RNDIS_DRIVER_DATA_POLL_STATUS) {
+		retval = usb_interrupt_msg(
+			dev->udev,
+			usb_rcvintpipe(dev->udev,
+				       dev->status->desc.bEndpointAddress),
+			&notification, sizeof(notification), &partial,
+			RNDIS_CONTROL_TIMEOUT_MS);
+		if (unlikely(retval < 0))
+			return retval;
+	}
 
 	/* Poll the control channel; the request probably completed immediately */
 	rsp = buf->msg_type | RNDIS_MSG_COMPLETION;
@@ -579,7 +582,18 @@ EXPORT_SYMBOL_GPL(rndis_tx_fixup);
 
 static const struct driver_info	rndis_info = {
 	.description =	"RNDIS device",
-	.flags =	FLAG_ETHER | FLAG_FRAMING_RN | FLAG_NO_SETINT,
+	.flags =	FLAG_ETHER | FLAG_POINTTOPOINT | FLAG_FRAMING_RN | FLAG_NO_SETINT,
+	.bind =		rndis_bind,
+	.unbind =	rndis_unbind,
+	.status =	rndis_status,
+	.rx_fixup =	rndis_rx_fixup,
+	.tx_fixup =	rndis_tx_fixup,
+};
+
+static const struct driver_info	rndis_poll_status_info = {
+	.description =	"RNDIS device (poll status before control)",
+	.flags =	FLAG_ETHER | FLAG_POINTTOPOINT | FLAG_FRAMING_RN | FLAG_NO_SETINT,
+	.data =		RNDIS_DRIVER_DATA_POLL_STATUS,
 	.bind =		rndis_bind,
 	.unbind =	rndis_unbind,
 	.status =	rndis_status,
@@ -591,13 +605,18 @@ static const struct driver_info	rndis_info = {
 
 static const struct usb_device_id	products [] = {
 {
+	/* 2Wire HomePortal 1000SW */
+	USB_DEVICE_AND_INTERFACE_INFO(0x1630, 0x0042,
+				      USB_CLASS_COMM, 2 /* ACM */, 0x0ff),
+	.driver_info = (unsigned long) &rndis_poll_status_info,
+}, {
 	/* RNDIS is MSFT's un-official variant of CDC ACM */
 	USB_INTERFACE_INFO(USB_CLASS_COMM, 2 /* ACM */, 0x0ff),
 	.driver_info = (unsigned long) &rndis_info,
 }, {
 	/* "ActiveSync" is an undocumented variant of RNDIS, used in WM5 */
 	USB_INTERFACE_INFO(USB_CLASS_MISC, 1, 1),
-	.driver_info = (unsigned long) &rndis_info,
+	.driver_info = (unsigned long) &rndis_poll_status_info,
 }, {
 	/* RNDIS for tethering */
 	USB_INTERFACE_INFO(USB_CLASS_WIRELESS_CONTROLLER, 1, 3),

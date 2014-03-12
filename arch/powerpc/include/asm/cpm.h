@@ -7,6 +7,30 @@
 #include <linux/of.h>
 
 /*
+ * SPI Parameter RAM common to QE and CPM.
+ */
+struct spi_pram {
+	__be16	rbase;	/* Rx Buffer descriptor base address */
+	__be16	tbase;	/* Tx Buffer descriptor base address */
+	u8	rfcr;	/* Rx function code */
+	u8	tfcr;	/* Tx function code */
+	__be16	mrblr;	/* Max receive buffer length */
+	__be32	rstate;	/* Internal */
+	__be32	rdp;	/* Internal */
+	__be16	rbptr;	/* Internal */
+	__be16	rbc;	/* Internal */
+	__be32	rxtmp;	/* Internal */
+	__be32	tstate;	/* Internal */
+	__be32	tdp;	/* Internal */
+	__be16	tbptr;	/* Internal */
+	__be16	tbc;	/* Internal */
+	__be32	txtmp;	/* Internal */
+	__be32	res;	/* Tx temp. */
+	__be16  rpbase;	/* Relocation pointer (CPM1 only) */
+	__be16	res1;	/* Reserved */
+};
+
+/*
  * USB Controller pram common to QE and CPM.
  */
 struct usb_ctlr {
@@ -74,7 +98,7 @@ typedef struct cpm_buf_desc {
 #define BD_SC_INTRPT	(0x1000)	/* Interrupt on change */
 #define BD_SC_LAST	(0x0800)	/* Last buffer in frame */
 #define BD_SC_TC	(0x0400)	/* Transmit CRC */
-#define BD_SC_CM	(0x0200)	/* Continous mode */
+#define BD_SC_CM	(0x0200)	/* Continuous mode */
 #define BD_SC_ID	(0x0100)	/* Rec'd too many idles */
 #define BD_SC_P		(0x0100)	/* xmt preamble */
 #define BD_SC_BR	(0x0020)	/* Break received */

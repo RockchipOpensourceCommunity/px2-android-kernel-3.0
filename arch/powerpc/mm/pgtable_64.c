@@ -34,7 +34,7 @@
 #include <linux/vmalloc.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
-#include <linux/lmb.h>
+#include <linux/memblock.h>
 #include <linux/slab.h>
 
 #include <asm/pgalloc.h>
@@ -67,7 +67,7 @@ static void *early_alloc_pgtable(unsigned long size)
 	if (init_bootmem_done)
 		pt = __alloc_bootmem(size, size, __pa(MAX_DMA_ADDRESS));
 	else
-		pt = __va(lmb_alloc_base(size, size,
+		pt = __va(memblock_alloc_base(size, size,
 					 __pa(MAX_DMA_ADDRESS)));
 	memset(pt, 0, size);
 
@@ -223,6 +223,8 @@ void __iomem * __ioremap_caller(phys_addr_t addr, unsigned long size,
 					    caller);
 		if (area == NULL)
 			return NULL;
+
+		area->phys_addr = paligned;
 		ret = __ioremap_at(paligned, area->addr, size, flags);
 		if (!ret)
 			vunmap(area->addr);
@@ -253,7 +255,17 @@ void __iomem * ioremap(phys_addr_t addr, unsigned long size)
 	return __ioremap_caller(addr, size, flags, caller);
 }
 
-void __iomem * ioremap_flags(phys_addr_t addr, unsigned long size,
+void __iomem * ioremap_wc(phys_addr_t addr, unsigned long size)
+{
+	unsigned long flags = _PAGE_NO_CACHE;
+	void *caller = __builtin_return_address(0);
+
+	if (ppc_md.ioremap)
+		return ppc_md.ioremap(addr, size, flags, caller);
+	return __ioremap_caller(addr, size, flags, caller);
+}
+
+void __iomem * ioremap_prot(phys_addr_t addr, unsigned long size,
 			     unsigned long flags)
 {
 	void *caller = __builtin_return_address(0);
@@ -309,7 +321,8 @@ void iounmap(volatile void __iomem *token)
 }
 
 EXPORT_SYMBOL(ioremap);
-EXPORT_SYMBOL(ioremap_flags);
+EXPORT_SYMBOL(ioremap_wc);
+EXPORT_SYMBOL(ioremap_prot);
 EXPORT_SYMBOL(__ioremap);
 EXPORT_SYMBOL(__ioremap_at);
 EXPORT_SYMBOL(iounmap);

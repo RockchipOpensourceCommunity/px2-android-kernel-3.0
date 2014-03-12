@@ -17,8 +17,8 @@ struct r10_private_data_s {
 	spinlock_t		device_lock;
 
 	/* geometry */
-	int			near_copies;  /* number of copies layed out raid0 style */
-	int 			far_copies;   /* number of copies layed out
+	int			near_copies;  /* number of copies laid out raid0 style */
+	int 			far_copies;   /* number of copies laid out
 					       * at large strides across drives
 					       */
 	int			far_offset;   /* far_copies are offset by 1 stripe
@@ -37,11 +37,6 @@ struct r10_private_data_s {
 
 	int chunk_shift; /* shift from chunks to sectors */
 	sector_t chunk_mask;
-
-	int			scale_disks;  /* When starting array, multiply
-					       * each ->raid_disk by this.
-					       * Need for raid0->raid10 migration
-					       */
 
 	struct list_head	retry_list;
 	/* queue pending writes and submit them on unplug */

@@ -211,6 +211,7 @@ int snd_card_create(int idx, const char *xid,
 	spin_lock_init(&card->files_lock);
 	INIT_LIST_HEAD(&card->files_list);
 	init_waitqueue_head(&card->shutdown_sleep);
+	atomic_set(&card->refcount, 0);
 #ifdef CONFIG_PM
 	mutex_init(&card->power_lock);
 	init_waitqueue_head(&card->power_sleep);
@@ -342,7 +343,6 @@ static const struct file_operations snd_shutdown_f_ops =
 int snd_card_disconnect(struct snd_card *card)
 {
 	struct snd_monitor_file *mfile;
-	struct file *file;
 	int err;
 
 	if (!card)
@@ -366,8 +366,6 @@ int snd_card_disconnect(struct snd_card *card)
 	
 	spin_lock(&card->files_lock);
 	list_for_each_entry(mfile, &card->files_list, list) {
-		file = mfile->file;
-
 		/* it's critical part, use endless loop */
 		/* we have no room to fail */
 		mfile->disconnected_f_op = mfile->file->f_op;
@@ -395,12 +393,10 @@ int snd_card_disconnect(struct snd_card *card)
 		snd_printk(KERN_ERR "not all devices for card %i can be disconnected\n", card->number);
 
 	snd_info_card_disconnect(card);
-#ifndef CONFIG_SYSFS_DEPRECATED
 	if (card->card_dev) {
 		device_unregister(card->card_dev);
 		card->card_dev = NULL;
 	}
-#endif
 #ifdef CONFIG_PM
 	wake_up(&card->power_sleep);
 #endif
@@ -449,21 +445,36 @@ static int snd_card_do_free(struct snd_card *card)
 	return 0;
 }
 
+/**
+ * snd_card_unref - release the reference counter
+ * @card: the card instance
+ *
+ * Decrements the reference counter.  When it reaches to zero, wake up
+ * the sleeper and call the destructor if needed.
+ */
+void snd_card_unref(struct snd_card *card)
+{
+	if (atomic_dec_and_test(&card->refcount)) {
+		wake_up(&card->shutdown_sleep);
+		if (card->free_on_last_close)
+			snd_card_do_free(card);
+	}
+}
+EXPORT_SYMBOL(snd_card_unref);
+
 int snd_card_free_when_closed(struct snd_card *card)
 {
-	int free_now = 0;
-	int ret = snd_card_disconnect(card);
-	if (ret)
+	int ret;
+
+	atomic_inc(&card->refcount);
+	ret = snd_card_disconnect(card);
+	if (ret) {
+		atomic_dec(&card->refcount);
 		return ret;
+	}
 
-	spin_lock(&card->files_lock);
-	if (list_empty(&card->files_list))
-		free_now = 1;
-	else
-		card->free_on_last_close = 1;
-	spin_unlock(&card->files_lock);
-
-	if (free_now)
+	card->free_on_last_close = 1;
+	if (atomic_dec_and_test(&card->refcount))
 		snd_card_do_free(card);
 	return 0;
 }
@@ -477,7 +488,7 @@ int snd_card_free(struct snd_card *card)
 		return ret;
 
 	/* wait, until all devices are ready for the free operation */
-	wait_event(card->shutdown_sleep, list_empty(&card->files_list));
+	wait_event(card->shutdown_sleep, !atomic_read(&card->refcount));
 	snd_card_do_free(card);
 	return 0;
 }
@@ -516,7 +527,7 @@ static void snd_card_set_id_no_lock(struct snd_card *card, const char *nid)
 	id = card->id;
 	
 	if (*id == '\0')
-		strcpy(id, "default");
+		strcpy(id, "Default");
 
 	while (1) {
 	      	if (loops-- == 0) {
@@ -573,7 +584,6 @@ void snd_card_set_id(struct snd_card *card, const char *nid)
 }
 EXPORT_SYMBOL(snd_card_set_id);
 
-#ifndef CONFIG_SYSFS_DEPRECATED
 static ssize_t
 card_id_show_attr(struct device *dev,
 		  struct device_attribute *attr, char *buf)
@@ -607,11 +617,16 @@ card_id_store_attr(struct device *dev, struct device_attribute *attr,
 		return -EEXIST;
 	}
 	for (idx = 0; idx < snd_ecards_limit; idx++) {
-		if (snd_cards[idx] && !strcmp(snd_cards[idx]->id, buf1))
-			goto __exist;
+		if (snd_cards[idx] && !strcmp(snd_cards[idx]->id, buf1)) {
+			if (card == snd_cards[idx])
+				goto __ok;
+			else
+				goto __exist;
+		}
 	}
 	strcpy(card->id, buf1);
 	snd_info_card_id_change(card);
+__ok:
 	mutex_unlock(&snd_card_mutex);
 
 	return count;
@@ -630,7 +645,6 @@ card_number_show_attr(struct device *dev,
 
 static struct device_attribute card_number_attrs =
 	__ATTR(number, S_IRUGO, card_number_show_attr, NULL);
-#endif /* CONFIG_SYSFS_DEPRECATED */
 
 /**
  *  snd_card_register - register the soundcard
@@ -641,7 +655,7 @@ static struct device_attribute card_number_attrs =
  *  external accesses.  Thus, you should call this function at the end
  *  of the initialization of the card.
  *
- *  Returns zero otherwise a negative error code if the registrain failed.
+ *  Returns zero otherwise a negative error code if the registration failed.
  */
 int snd_card_register(struct snd_card *card)
 {
@@ -649,7 +663,7 @@ int snd_card_register(struct snd_card *card)
 
 	if (snd_BUG_ON(!card))
 		return -EINVAL;
-#ifndef CONFIG_SYSFS_DEPRECATED
+
 	if (!card->card_dev) {
 		card->card_dev = device_create(sound_class, card->dev,
 					       MKDEV(0, 0), card,
@@ -657,7 +671,7 @@ int snd_card_register(struct snd_card *card)
 		if (IS_ERR(card->card_dev))
 			card->card_dev = NULL;
 	}
-#endif
+
 	if ((err = snd_device_register_all(card)) < 0)
 		return err;
 	mutex_lock(&snd_card_mutex);
@@ -674,7 +688,6 @@ int snd_card_register(struct snd_card *card)
 	if (snd_mixer_oss_notify_callback)
 		snd_mixer_oss_notify_callback(card, SND_MIXER_OSS_NOTIFY_REGISTER);
 #endif
-#ifndef CONFIG_SYSFS_DEPRECATED
 	if (card->card_dev) {
 		err = device_create_file(card->card_dev, &card_id_attrs);
 		if (err < 0)
@@ -683,7 +696,7 @@ int snd_card_register(struct snd_card *card)
 		if (err < 0)
 			return err;
 	}
-#endif
+
 	return 0;
 }
 
@@ -848,6 +861,7 @@ int snd_card_file_add(struct snd_card *card, struct file *file)
 		return -ENOMEM;
 	mfile->file = file;
 	mfile->disconnected_f_op = NULL;
+	INIT_LIST_HEAD(&mfile->shutdown_list);
 	spin_lock(&card->files_lock);
 	if (card->shutdown) {
 		spin_unlock(&card->files_lock);
@@ -855,6 +869,7 @@ int snd_card_file_add(struct snd_card *card, struct file *file)
 		return -ENODEV;
 	}
 	list_add(&mfile->list, &card->files_list);
+	atomic_inc(&card->refcount);
 	spin_unlock(&card->files_lock);
 	return 0;
 }
@@ -877,31 +892,27 @@ EXPORT_SYMBOL(snd_card_file_add);
 int snd_card_file_remove(struct snd_card *card, struct file *file)
 {
 	struct snd_monitor_file *mfile, *found = NULL;
-	int last_close = 0;
 
 	spin_lock(&card->files_lock);
 	list_for_each_entry(mfile, &card->files_list, list) {
 		if (mfile->file == file) {
 			list_del(&mfile->list);
+			spin_lock(&shutdown_lock);
+			list_del(&mfile->shutdown_list);
+			spin_unlock(&shutdown_lock);
 			if (mfile->disconnected_f_op)
 				fops_put(mfile->disconnected_f_op);
 			found = mfile;
 			break;
 		}
 	}
-	if (list_empty(&card->files_list))
-		last_close = 1;
 	spin_unlock(&card->files_lock);
-	if (last_close) {
-		wake_up(&card->shutdown_sleep);
-		if (card->free_on_last_close)
-			snd_card_do_free(card);
-	}
 	if (!found) {
 		snd_printk(KERN_ERR "ALSA card file remove problem (%p)\n", file);
 		return -ENOENT;
 	}
 	kfree(found);
+	snd_card_unref(card);
 	return 0;
 }
 

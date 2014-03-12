@@ -48,7 +48,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>	/* support for loadable modules */
 #include <linux/slab.h>		/* kmalloc(), kfree() */
-#include <linux/smp_lock.h>
+#include <linux/mutex.h>
 #include <linux/mm.h>
 #include <linux/string.h>	/* inline mem*, str* functions */
 
@@ -58,8 +58,6 @@
 #include <linux/vmalloc.h>	/* vmalloc, vfree */
 #include <asm/uaccess.h>        /* copy_to/from_user */
 #include <linux/init.h>         /* __initfunc et al. */
-
-#define KMEM_SAFETYZONE 8
 
 #define DEV_TO_SLAVE(dev)	(*((struct net_device **)netdev_priv(dev)))
 
@@ -71,6 +69,7 @@
  *	WAN device IOCTL handlers
  */
 
+static DEFINE_MUTEX(wanrouter_mutex);
 static int wanrouter_device_setup(struct wan_device *wandev,
 				  wandev_conf_t __user *u_conf);
 static int wanrouter_device_stat(struct wan_device *wandev,
@@ -376,7 +375,7 @@ long wanrouter_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (wandev->magic != ROUTER_MAGIC)
 		return -EINVAL;
 
-	lock_kernel();
+	mutex_lock(&wanrouter_mutex);
 	switch (cmd) {
 	case ROUTER_SETUP:
 		err = wanrouter_device_setup(wandev, data);
@@ -408,7 +407,7 @@ long wanrouter_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			err = wandev->ioctl(wandev, cmd, arg);
 		else err = -EINVAL;
 	}
-	unlock_kernel();
+	mutex_unlock(&wanrouter_mutex);
 	return err;
 }
 
@@ -470,7 +469,7 @@ static int wanrouter_device_setup(struct wan_device *wandev,
 		data = vmalloc(conf->data_size);
 		if (!data) {
 			printk(KERN_INFO
-				"%s: ERROR, Faild allocate kernel memory !\n",
+				"%s: ERROR, Failed allocate kernel memory !\n",
 				wandev->name);
 			kfree(conf);
 			return -ENOBUFS;
@@ -480,7 +479,7 @@ static int wanrouter_device_setup(struct wan_device *wandev,
 			err = wandev->setup(wandev, conf);
 		} else {
 			printk(KERN_INFO
-			     "%s: ERROR, Faild to copy from user data !\n",
+			     "%s: ERROR, Failed to copy from user data !\n",
 			       wandev->name);
 			err = -EFAULT;
 		}
@@ -603,36 +602,31 @@ static int wanrouter_device_new_if(struct wan_device *wandev,
 		 * successfully, add it to the interface list.
 		 */
 
-		if (dev->name == NULL) {
-			err = -EINVAL;
-		} else {
+#ifdef WANDEBUG
+		printk(KERN_INFO "%s: registering interface %s...\n",
+		       wanrouter_modname, dev->name);
+#endif
 
-			#ifdef WANDEBUG
-			printk(KERN_INFO "%s: registering interface %s...\n",
-				wanrouter_modname, dev->name);
-			#endif
+		err = register_netdev(dev);
+		if (!err) {
+			struct net_device *slave = NULL;
+			unsigned long smp_flags=0;
 
-			err = register_netdev(dev);
-			if (!err) {
-				struct net_device *slave = NULL;
-				unsigned long smp_flags=0;
+			lock_adapter_irq(&wandev->lock, &smp_flags);
 
-				lock_adapter_irq(&wandev->lock, &smp_flags);
-
-				if (wandev->dev == NULL) {
-					wandev->dev = dev;
-				} else {
-					for (slave=wandev->dev;
-					     DEV_TO_SLAVE(slave);
-					     slave = DEV_TO_SLAVE(slave))
-						DEV_TO_SLAVE(slave) = dev;
-				}
-				++wandev->ndev;
-
-				unlock_adapter_irq(&wandev->lock, &smp_flags);
-				err = 0;	/* done !!! */
-				goto out;
+			if (wandev->dev == NULL) {
+				wandev->dev = dev;
+			} else {
+				for (slave=wandev->dev;
+				     DEV_TO_SLAVE(slave);
+				     slave = DEV_TO_SLAVE(slave))
+					DEV_TO_SLAVE(slave) = dev;
 			}
+			++wandev->ndev;
+
+			unlock_adapter_irq(&wandev->lock, &smp_flags);
+			err = 0;	/* done !!! */
+			goto out;
 		}
 		if (wandev->del_if)
 			wandev->del_if(wandev, dev);

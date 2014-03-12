@@ -24,47 +24,36 @@
 #include <linux/nmi.h>
 #include <linux/dmi.h>
 
+#define PANIC_TIMER_STEP 100
+#define PANIC_BLINK_SPD 18
+
+/* Machine specific panic information string */
+char *mach_panic_string;
+
 int panic_on_oops;
 static unsigned long tainted_mask;
 static int pause_on_oops;
 static int pause_on_oops_flag;
 static DEFINE_SPINLOCK(pause_on_oops_lock);
 
-int panic_timeout;
+#ifndef CONFIG_PANIC_TIMEOUT
+#define CONFIG_PANIC_TIMEOUT 0
+#endif
+int panic_timeout = CONFIG_PANIC_TIMEOUT;
+EXPORT_SYMBOL_GPL(panic_timeout);
 
 ATOMIC_NOTIFIER_HEAD(panic_notifier_list);
 
 EXPORT_SYMBOL(panic_notifier_list);
 
-/* Returns how long it waited in ms */
-long (*panic_blink)(long time);
-EXPORT_SYMBOL(panic_blink);
-
-static void panic_blink_one_second(void)
+static long no_blink(int state)
 {
-	static long i = 0, end;
-
-	if (panic_blink) {
-		end = i + MSEC_PER_SEC;
-
-		while (i < end) {
-			i += panic_blink(i);
-			mdelay(1);
-			i++;
-		}
-	} else {
-		/*
-		 * When running under a hypervisor a small mdelay may get
-		 * rounded up to the hypervisor timeslice. For example, with
-		 * a 1ms in 10ms hypervisor timeslice we might inflate a
-		 * mdelay(1) loop by 10x.
-		 *
-		 * If we have nothing to blink, spin on 1 second calls to
-		 * mdelay to avoid this.
-		 */
-		mdelay(MSEC_PER_SEC);
-	}
+	return 0;
 }
+
+/* Returns how long it waited in ms */
+long (*panic_blink)(int state);
+EXPORT_SYMBOL(panic_blink);
 
 /**
  *	panic - halt the system
@@ -78,7 +67,8 @@ NORET_TYPE void panic(const char * fmt, ...)
 {
 	static char buf[1024];
 	va_list args;
-	long i;
+	long i, i_next = 0;
+	int state = 0;
 
 	/*
 	 * It's possible to come here directly from a panic-assertion and
@@ -117,6 +107,9 @@ NORET_TYPE void panic(const char * fmt, ...)
 
 	bust_spinlocks(0);
 
+	if (!panic_blink)
+		panic_blink = no_blink;
+
 	if (panic_timeout > 0) {
 		/*
 		 * Delay timeout seconds before rebooting the machine.
@@ -124,9 +117,13 @@ NORET_TYPE void panic(const char * fmt, ...)
 		 */
 		printk(KERN_EMERG "Rebooting in %d seconds..", panic_timeout);
 
-		for (i = 0; i < panic_timeout; i++) {
+		for (i = 0; i < panic_timeout * 1000; i += PANIC_TIMER_STEP) {
 			touch_nmi_watchdog();
-			panic_blink_one_second();
+			if (i >= i_next) {
+				i += panic_blink(state ^= 1);
+				i_next = i + 3600 / PANIC_BLINK_SPD;
+			}
+			mdelay(PANIC_TIMER_STEP);
 		}
 		/*
 		 * This will not be a clean reboot, with everything
@@ -152,9 +149,13 @@ NORET_TYPE void panic(const char * fmt, ...)
 	}
 #endif
 	local_irq_enable();
-	while (1) {
+	for (i = 0; ; i += PANIC_TIMER_STEP) {
 		touch_softlockup_watchdog();
-		panic_blink_one_second();
+		if (i >= i_next) {
+			i += panic_blink(state ^= 1);
+			i_next = i + 3600 / PANIC_BLINK_SPD;
+		}
+		mdelay(PANIC_TIMER_STEP);
 	}
 }
 
@@ -241,8 +242,16 @@ void add_taint(unsigned flag)
 	 * Also we want to keep up lockdep for staging development and
 	 * post-warning case.
 	 */
-	if (flag != TAINT_CRAP && flag != TAINT_WARN && __debug_locks_off())
-		printk(KERN_WARNING "Disabling lock debugging due to kernel taint\n");
+	switch (flag) {
+	case TAINT_CRAP:
+	case TAINT_WARN:
+	case TAINT_FIRMWARE_WORKAROUND:
+		break;
+
+	default:
+		if (__debug_locks_off())
+			printk(KERN_WARNING "Disabling lock debugging due to kernel taint\n");
+	}
 
 	set_bit(flag, &tainted_mask);
 }
@@ -344,9 +353,14 @@ static int init_oops_id(void)
 }
 late_initcall(init_oops_id);
 
-static void print_oops_end_marker(void)
+void print_oops_end_marker(void)
 {
 	init_oops_id();
+
+	if (mach_panic_string)
+		printk(KERN_WARNING "Board Information: %s\n",
+		       mach_panic_string);
+
 	printk(KERN_WARNING "---[ end trace %016llx ]---\n",
 		(unsigned long long)oops_id);
 }
@@ -438,3 +452,13 @@ EXPORT_SYMBOL(__stack_chk_fail);
 
 core_param(panic, panic_timeout, int, 0644);
 core_param(pause_on_oops, pause_on_oops, int, 0644);
+
+static int __init oops_setup(char *s)
+{
+	if (!s)
+		return -EINVAL;
+	if (!strcmp(s, "panic"))
+		panic_on_oops = 1;
+	return 0;
+}
+early_param("oops", oops_setup);

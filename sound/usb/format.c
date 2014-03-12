@@ -30,6 +30,7 @@
 #include "helper.h"
 #include "debug.h"
 #include "clock.h"
+#include "format.h"
 
 /*
  * parse the audio format type I descriptor
@@ -49,7 +50,8 @@ static u64 parse_audio_format_i_type(struct snd_usb_audio *chip,
 	u64 pcm_formats;
 
 	switch (protocol) {
-	case UAC_VERSION_1: {
+	case UAC_VERSION_1:
+	default: {
 		struct uac_format_type_i_discrete_descriptor *fmt = _fmt;
 		sample_width = fmt->bBitResolution;
 		sample_bytes = fmt->bSubframeSize;
@@ -64,9 +66,6 @@ static u64 parse_audio_format_i_type(struct snd_usb_audio *chip,
 		format <<= 1;
 		break;
 	}
-
-	default:
-		return -EINVAL;
 	}
 
 	pcm_formats = 0;
@@ -78,7 +77,10 @@ static u64 parse_audio_format_i_type(struct snd_usb_audio *chip,
 		format = 1 << UAC_FORMAT_TYPE_I_PCM;
 	}
 	if (format & (1 << UAC_FORMAT_TYPE_I_PCM)) {
-		if (sample_width > sample_bytes * 8) {
+		if (chip->usb_id == USB_ID(0x0582, 0x0016) /* Edirol SD-90 */ &&
+		    sample_width == 24 && sample_bytes == 2)
+			sample_bytes = 3;
+		else if (sample_width > sample_bytes * 8) {
 			snd_printk(KERN_INFO "%d:%u:%d : sample bitwidth %d in over sample bytes %d\n",
 				   chip->dev->devnum, fp->iface, fp->altsetting,
 				   sample_width, sample_bytes);
@@ -175,9 +177,11 @@ static int parse_audio_format_rates_v1(struct snd_usb_audio *chip, struct audiof
 			if (!rate)
 				continue;
 			/* C-Media CM6501 mislabels its 96 kHz altsetting */
+			/* Terratec Aureon 7.1 USB C-Media 6206, too */
 			if (rate == 48000 && nr_rates == 1 &&
 			    (chip->usb_id == USB_ID(0x0d8c, 0x0201) ||
-			     chip->usb_id == USB_ID(0x0d8c, 0x0102)) &&
+			     chip->usb_id == USB_ID(0x0d8c, 0x0102) ||
+			     chip->usb_id == USB_ID(0x0ccd, 0x00b1)) &&
 			    fp->altsetting == 5 && fp->maxpacksize == 392)
 				rate = 96000;
 			/* Creative VF0470 Live Cam reports 16 kHz instead of 8kHz */
@@ -206,22 +210,82 @@ static int parse_audio_format_rates_v1(struct snd_usb_audio *chip, struct audiof
 }
 
 /*
+ * Helper function to walk the array of sample rate triplets reported by
+ * the device. The problem is that we need to parse whole array first to
+ * get to know how many sample rates we have to expect.
+ * Then fp->rate_table can be allocated and filled.
+ */
+static int parse_uac2_sample_rate_range(struct audioformat *fp, int nr_triplets,
+					const unsigned char *data)
+{
+	int i, nr_rates = 0;
+
+	fp->rates = fp->rate_min = fp->rate_max = 0;
+
+	for (i = 0; i < nr_triplets; i++) {
+		int min = combine_quad(&data[2 + 12 * i]);
+		int max = combine_quad(&data[6 + 12 * i]);
+		int res = combine_quad(&data[10 + 12 * i]);
+		int rate;
+
+		if ((max < 0) || (min < 0) || (res < 0) || (max < min))
+			continue;
+
+		/*
+		 * for ranges with res == 1, we announce a continuous sample
+		 * rate range, and this function should return 0 for no further
+		 * parsing.
+		 */
+		if (res == 1) {
+			fp->rate_min = min;
+			fp->rate_max = max;
+			fp->rates = SNDRV_PCM_RATE_CONTINUOUS;
+			return 0;
+		}
+
+		for (rate = min; rate <= max; rate += res) {
+			if (fp->rate_table)
+				fp->rate_table[nr_rates] = rate;
+			if (!fp->rate_min || rate < fp->rate_min)
+				fp->rate_min = rate;
+			if (!fp->rate_max || rate > fp->rate_max)
+				fp->rate_max = rate;
+			fp->rates |= snd_pcm_rate_to_rate_bit(rate);
+
+			nr_rates++;
+
+			/* avoid endless loop */
+			if (res == 0)
+				break;
+		}
+	}
+
+	return nr_rates;
+}
+
+/*
  * parse the format descriptor and stores the possible sample rates
  * on the audioformat table (audio class v2).
  */
 static int parse_audio_format_rates_v2(struct snd_usb_audio *chip,
-				       struct audioformat *fp,
-				       struct usb_host_interface *iface)
+				       struct audioformat *fp)
 {
 	struct usb_device *dev = chip->dev;
 	unsigned char tmp[2], *data;
-	int i, nr_rates, data_size, ret = 0;
-	int clock = snd_usb_clock_find_source(chip, chip->ctrl_intf, fp->clock);
+	int nr_triplets, data_size, ret = 0;
+	int clock = snd_usb_clock_find_source(chip, fp->clock);
+
+	if (clock < 0) {
+		snd_printk(KERN_ERR "%s(): unable to find clock source (clock %d)\n",
+				__func__, clock);
+		goto err;
+	}
 
 	/* get the number of sample rates first by only fetching 2 bytes */
 	ret = snd_usb_ctl_msg(dev, usb_rcvctrlpipe(dev, 0), UAC2_CS_RANGE,
 			      USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_IN,
-			      UAC2_CS_CONTROL_SAM_FREQ << 8, clock << 8,
+			      UAC2_CS_CONTROL_SAM_FREQ << 8,
+			      snd_usb_ctrl_intf(chip) | (clock << 8),
 			      tmp, sizeof(tmp), 1000);
 
 	if (ret < 0) {
@@ -230,8 +294,8 @@ static int parse_audio_format_rates_v2(struct snd_usb_audio *chip,
 		goto err;
 	}
 
-	nr_rates = (tmp[1] << 8) | tmp[0];
-	data_size = 2 + 12 * nr_rates;
+	nr_triplets = (tmp[1] << 8) | tmp[0];
+	data_size = 2 + 12 * nr_triplets;
 	data = kzalloc(data_size, GFP_KERNEL);
 	if (!data) {
 		ret = -ENOMEM;
@@ -241,7 +305,8 @@ static int parse_audio_format_rates_v2(struct snd_usb_audio *chip,
 	/* now get the full information */
 	ret = snd_usb_ctl_msg(dev, usb_rcvctrlpipe(dev, 0), UAC2_CS_RANGE,
 			      USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_IN,
-			      UAC2_CS_CONTROL_SAM_FREQ << 8, clock << 8,
+			      UAC2_CS_CONTROL_SAM_FREQ << 8,
+			      snd_usb_ctrl_intf(chip) | (clock << 8),
 			      data, data_size, 1000);
 
 	if (ret < 0) {
@@ -251,26 +316,28 @@ static int parse_audio_format_rates_v2(struct snd_usb_audio *chip,
 		goto err_free;
 	}
 
-	fp->rate_table = kmalloc(sizeof(int) * nr_rates, GFP_KERNEL);
+	/* Call the triplet parser, and make sure fp->rate_table is NULL.
+	 * We just use the return value to know how many sample rates we
+	 * will have to deal with. */
+	kfree(fp->rate_table);
+	fp->rate_table = NULL;
+	fp->nr_rates = parse_uac2_sample_rate_range(fp, nr_triplets, data);
+
+	if (fp->nr_rates == 0) {
+		/* SNDRV_PCM_RATE_CONTINUOUS */
+		ret = 0;
+		goto err_free;
+	}
+
+	fp->rate_table = kmalloc(sizeof(int) * fp->nr_rates, GFP_KERNEL);
 	if (!fp->rate_table) {
 		ret = -ENOMEM;
 		goto err_free;
 	}
 
-	fp->nr_rates = 0;
-	fp->rate_min = fp->rate_max = 0;
-
-	for (i = 0; i < nr_rates; i++) {
-		int rate = combine_quad(&data[2 + 12 * i]);
-
-		fp->rate_table[fp->nr_rates] = rate;
-		if (!fp->rate_min || rate < fp->rate_min)
-			fp->rate_min = rate;
-		if (!fp->rate_max || rate > fp->rate_max)
-			fp->rate_max = rate;
-		fp->rates |= snd_pcm_rate_to_rate_bit(rate);
-		fp->nr_rates++;
-	}
+	/* Call the triplet parser again, but this time, fp->rate_table is
+	 * allocated, so the rates will be stored */
+	parse_uac2_sample_rate_range(fp, nr_triplets, data);
 
 err_free:
 	kfree(data);
@@ -321,13 +388,17 @@ static int parse_audio_format_i(struct snd_usb_audio *chip,
 	 * audio class v2 uses class specific EP0 range requests for that.
 	 */
 	switch (protocol) {
+	default:
+		snd_printdd(KERN_WARNING "%d:%u:%d : invalid protocol version %d, assuming v1\n",
+			   chip->dev->devnum, fp->iface, fp->altsetting, protocol);
+		/* fall through */
 	case UAC_VERSION_1:
 		fp->channels = fmt->bNrChannels;
 		ret = parse_audio_format_rates_v1(chip, fp, (unsigned char *) fmt, 7);
 		break;
 	case UAC_VERSION_2:
 		/* fp->channels is already set in this case */
-		ret = parse_audio_format_rates_v2(chip, fp, iface);
+		ret = parse_audio_format_rates_v2(chip, fp);
 		break;
 	}
 
@@ -371,6 +442,10 @@ static int parse_audio_format_ii(struct snd_usb_audio *chip,
 	fp->channels = 1;
 
 	switch (protocol) {
+	default:
+		snd_printdd(KERN_WARNING "%d:%u:%d : invalid protocol version %d, assuming v1\n",
+			   chip->dev->devnum, fp->iface, fp->altsetting, protocol);
+		/* fall through */
 	case UAC_VERSION_1: {
 		struct uac_format_type_ii_discrete_descriptor *fmt = _fmt;
 		brate = le16_to_cpu(fmt->wMaxBitRate);
@@ -386,7 +461,7 @@ static int parse_audio_format_ii(struct snd_usb_audio *chip,
 		framesize = le16_to_cpu(fmt->wSamplesPerFrame);
 		snd_printd(KERN_INFO "found format II with max.bitrate = %d, frame size=%d\n", brate, framesize);
 		fp->frame_size = framesize;
-		ret = parse_audio_format_rates_v2(chip, fp, iface);
+		ret = parse_audio_format_rates_v2(chip, fp);
 		break;
 	}
 	}

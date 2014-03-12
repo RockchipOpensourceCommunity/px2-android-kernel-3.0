@@ -105,19 +105,12 @@ err_out:
  * 	mask: contains the permission mask
  *	fsmagic: hex value
  *
- * Must be called with iint->mutex held.
- *
- * Return 0 to measure. Return 1 if already measured.
- * For matching a DONT_MEASURE policy, no policy, or other
- * error, return an error code.
+ * Return 0 to measure. For matching a DONT_MEASURE policy, no policy,
+ * or other error, return an error code.
 */
-int ima_must_measure(struct ima_iint_cache *iint, struct inode *inode,
-		     int mask, int function)
+int ima_must_measure(struct inode *inode, int mask, int function)
 {
 	int must_measure;
-
-	if (iint->flags & IMA_MEASURED)
-		return 1;
 
 	must_measure = ima_match_policy(inode, function, mask);
 	return must_measure ? 0 : -EACCES;
@@ -184,8 +177,8 @@ void ima_store_measurement(struct ima_iint_cache *iint, struct file *file,
 	strncpy(entry->template.file_name, filename, IMA_EVENT_NAME_LEN_MAX);
 
 	result = ima_store_template(entry, violation, inode);
-	if (!result)
+	if (!result || result == -EEXIST)
 		iint->flags |= IMA_MEASURED;
-	else
+	if (result < 0)
 		kfree(entry);
 }

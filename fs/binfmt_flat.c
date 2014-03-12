@@ -68,11 +68,7 @@
  * Here we can be a bit looser than the data sections since this
  * needs to only meet arch ABI requirements.
  */
-#ifdef ARCH_SLAB_MINALIGN
-#define FLAT_STACK_ALIGN	(ARCH_SLAB_MINALIGN)
-#else
-#define FLAT_STACK_ALIGN	(sizeof(void *))
-#endif
+#define FLAT_STACK_ALIGN	max_t(unsigned long, sizeof(void *), ARCH_SLAB_MINALIGN)
 
 #define RELOC_FAILED 0xff00ff01		/* Relocation incorrect somewhere */
 #define UNLOADED_LIB 0x7ff000ff		/* Placeholder for unused library */
@@ -721,7 +717,7 @@ static int load_flat_file(struct linux_binprm * bprm,
 	 * help simplify all this mumbo jumbo
 	 *
 	 * We've got two different sections of relocation entries.
-	 * The first is the GOT which resides at the begining of the data segment
+	 * The first is the GOT which resides at the beginning of the data segment
 	 * and is terminated with a -1.  This one can be relocated in place.
 	 * The second is the extra relocation entries tacked after the image's
 	 * data segment. These require a little more processing as the entry is
@@ -824,6 +820,8 @@ static int load_flat_shared_library(int id, struct lib_info *libs)
 	int res;
 	char buf[16];
 
+	memset(&bprm, 0, sizeof(bprm));
+
 	/* Create the file name */
 	sprintf(buf, "/lib/lib%d.so", id);
 
@@ -838,6 +836,12 @@ static int load_flat_shared_library(int id, struct lib_info *libs)
 	res = -ENOMEM;
 	if (!bprm.cred)
 		goto out;
+
+	/* We don't really care about recalculating credentials at this point
+	 * as we're past the point of no return and are dealing with shared
+	 * libraries.
+	 */
+	bprm.cred_prepared = 1;
 
 	res = prepare_binprm(&bprm);
 

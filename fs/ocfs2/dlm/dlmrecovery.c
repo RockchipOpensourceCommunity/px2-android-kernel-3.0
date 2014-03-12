@@ -463,7 +463,7 @@ static int dlm_do_recovery(struct dlm_ctxt *dlm)
 	if (dlm->reco.dead_node == O2NM_INVALID_NODE_NUM) {
 		int bit;
 
-		bit = find_next_bit (dlm->recovery_map, O2NM_MAX_NODES+1, 0);
+		bit = find_next_bit (dlm->recovery_map, O2NM_MAX_NODES, 0);
 		if (bit >= O2NM_MAX_NODES || bit < 0)
 			dlm_set_reco_dead_node(dlm, O2NM_INVALID_NODE_NUM);
 		else
@@ -727,7 +727,6 @@ static int dlm_remaster_locks(struct dlm_ctxt *dlm, u8 dead_node)
 	if (destroy)
 		dlm_destroy_recovery_area(dlm, dead_node);
 
-	mlog_exit(status);
 	return status;
 }
 
@@ -1496,9 +1495,9 @@ leave:
 			kfree(buf);
 		if (item)
 			kfree(item);
+		mlog_errno(ret);
 	}
 
-	mlog_exit(ret);
 	return ret;
 }
 
@@ -1567,7 +1566,6 @@ leave:
 		dlm_lockres_put(res);
 	}
 	kfree(data);
-	mlog_exit(ret);
 }
 
 
@@ -1986,7 +1984,6 @@ leave:
 			dlm_lock_put(newlock);
 	}
 
-	mlog_exit(ret);
 	return ret;
 }
 
@@ -1997,6 +1994,8 @@ void dlm_move_lockres_to_recovery_list(struct dlm_ctxt *dlm,
 	struct list_head *queue;
 	struct dlm_lock *lock, *next;
 
+	assert_spin_locked(&dlm->spinlock);
+	assert_spin_locked(&res->spinlock);
 	res->state |= DLM_LOCK_RES_RECOVERING;
 	if (!list_empty(&res->recovering)) {
 		mlog(0,
@@ -2080,8 +2079,6 @@ static void dlm_finish_local_lockres_recovery(struct dlm_ctxt *dlm,
 	struct hlist_node *hash_iter;
 	struct hlist_head *bucket;
 	struct dlm_lock_resource *res, *next;
-
-	mlog_entry_void();
 
 	assert_spin_locked(&dlm->spinlock);
 
@@ -2326,19 +2323,15 @@ static void dlm_do_local_recovery_cleanup(struct dlm_ctxt *dlm, u8 dead_node)
 			/* zero the lvb if necessary */
 			dlm_revalidate_lvb(dlm, res, dead_node);
 			if (res->owner == dead_node) {
-				if (res->state & DLM_LOCK_RES_DROPPING_REF)
-					mlog(0, "%s:%.*s: owned by "
-					     "dead node %u, this node was "
-					     "dropping its ref when it died. "
-					     "continue, dropping the flag.\n",
-					     dlm->name, res->lockname.len,
-					     res->lockname.name, dead_node);
+				if (res->state & DLM_LOCK_RES_DROPPING_REF) {
+					mlog(ML_NOTICE, "Ignore %.*s for "
+					     "recovery as it is being freed\n",
+					     res->lockname.len,
+					     res->lockname.name);
+				} else
+					dlm_move_lockres_to_recovery_list(dlm,
+									  res);
 
-				/* the wake_up for this will happen when the
-				 * RECOVERING flag is dropped later */
-				res->state &= ~DLM_LOCK_RES_DROPPING_REF;
-
-				dlm_move_lockres_to_recovery_list(dlm, res);
 			} else if (res->owner == dlm->node_num) {
 				dlm_free_dead_locks(dlm, res, dead_node);
 				__dlm_lockres_calc_usage(dlm, res);
@@ -2400,6 +2393,7 @@ static void __dlm_hb_node_down(struct dlm_ctxt *dlm, int idx)
 
 	mlog(0, "node %u being removed from domain map!\n", idx);
 	clear_bit(idx, dlm->domain_map);
+	clear_bit(idx, dlm->exit_domain_map);
 	/* wake up migration waiters if a node goes down.
 	 * perhaps later we can genericize this for other waiters. */
 	wake_up(&dlm->migration_wq);
@@ -2608,8 +2602,6 @@ static int dlm_send_begin_reco_message(struct dlm_ctxt *dlm, u8 dead_node)
 	struct dlm_node_iter iter;
 	int nodenum;
 	int status;
-
-	mlog_entry("%u\n", dead_node);
 
 	mlog(0, "%s: dead node is %u\n", dlm->name, dead_node);
 

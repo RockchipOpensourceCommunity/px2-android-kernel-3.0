@@ -209,6 +209,9 @@ void proc_device_tree_add_node(struct device_node *np,
 	for (pp = np->properties; pp != NULL; pp = pp->next) {
 		p = pp->name;
 
+		if (strchr(p, '/'))
+			continue;
+
 		if (duplicate_name(de, p))
 			p = fixup_name(np, de, p);
 
@@ -230,7 +233,7 @@ void __init proc_device_tree_init(void)
 		return;
 	root = of_find_node_by_path("/");
 	if (root == NULL) {
-		printk(KERN_ERR "/proc/device-tree: can't find root\n");
+		pr_debug("/proc/device-tree: can't find root\n");
 		return;
 	}
 	proc_device_tree_add_node(root, proc_device_tree);

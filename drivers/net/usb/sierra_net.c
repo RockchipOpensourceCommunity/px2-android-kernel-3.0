@@ -165,7 +165,7 @@ struct lsi_umts {
 	u8 gw_addr_len; /* NW-supplied GW address len */
 	u8 gw_addr[16]; /* NW-supplied GW address (bigendian) */
 	u8 reserved[8];
-} __attribute__ ((packed));
+} __packed;
 
 #define SIERRA_NET_LSI_COMMON_LEN      4
 #define SIERRA_NET_LSI_UMTS_LEN        (sizeof(struct lsi_umts))
@@ -203,7 +203,7 @@ static inline void sierra_net_set_private(struct usbnet *dev,
 /* is packet IPv4 */
 static inline int is_ip(struct sk_buff *skb)
 {
-	return (skb->protocol == cpu_to_be16(ETH_P_IP));
+	return skb->protocol == cpu_to_be16(ETH_P_IP);
 }
 
 /*
@@ -354,7 +354,7 @@ static void sierra_net_set_ctx_index(struct sierra_net_data *priv, u8 ctx_ix)
 
 static inline int sierra_net_is_valid_addrlen(u8 len)
 {
-	return (len == sizeof(struct in_addr));
+	return len == sizeof(struct in_addr);
 }
 
 static int sierra_net_parse_lsi(struct usbnet *dev, char *data, int datalen)
@@ -678,7 +678,7 @@ static int sierra_net_get_fw_attr(struct usbnet *dev, u16 *datap)
 		return -EIO;
 	}
 
-	*datap = *attrdata;
+	*datap = le16_to_cpu(*attrdata);
 
 	kfree(attrdata);
 	return result;
@@ -802,10 +802,9 @@ static void sierra_net_unbind(struct usbnet *dev, struct usb_interface *intf)
 
 	dev_dbg(&dev->udev->dev, "%s", __func__);
 
-	/* Kill the timer then flush the work queue */
+	/* kill the timer and work */
 	del_timer_sync(&priv->sync_timer);
-
-	flush_scheduled_work();
+	cancel_work_sync(&priv->sierra_net_kevent);
 
 	/* tell modem we are going away */
 	status = sierra_net_send_cmd(dev, priv->shdwn_msg,
@@ -944,7 +943,7 @@ struct sk_buff *sierra_net_tx_fixup(struct usbnet *dev, struct sk_buff *skb,
 }
 
 static const u8 sierra_net_ifnum_list[] = { 7, 10, 11 };
-static const struct sierra_net_info_data sierra_net_info_data_68A3 = {
+static const struct sierra_net_info_data sierra_net_info_data_direct_ip = {
 	.rx_urb_size = 8 * 1024,
 	.whitelist = {
 		.infolen = ARRAY_SIZE(sierra_net_ifnum_list),
@@ -952,7 +951,7 @@ static const struct sierra_net_info_data sierra_net_info_data_68A3 = {
 	}
 };
 
-static const struct driver_info sierra_net_info_68A3 = {
+static const struct driver_info sierra_net_info_direct_ip = {
 	.description = "Sierra Wireless USB-to-WWAN Modem",
 	.flags = FLAG_WWAN | FLAG_SEND_ZLP,
 	.bind = sierra_net_bind,
@@ -960,12 +959,18 @@ static const struct driver_info sierra_net_info_68A3 = {
 	.status = sierra_net_status,
 	.rx_fixup = sierra_net_rx_fixup,
 	.tx_fixup = sierra_net_tx_fixup,
-	.data = (unsigned long)&sierra_net_info_data_68A3,
+	.data = (unsigned long)&sierra_net_info_data_direct_ip,
 };
 
 static const struct usb_device_id products[] = {
 	{USB_DEVICE(0x1199, 0x68A3), /* Sierra Wireless USB-to-WWAN modem */
-	.driver_info = (unsigned long) &sierra_net_info_68A3},
+	.driver_info = (unsigned long) &sierra_net_info_direct_ip},
+	{USB_DEVICE(0x0F3D, 0x68A3), /* AT&T Direct IP modem */
+	.driver_info = (unsigned long) &sierra_net_info_direct_ip},
+	{USB_DEVICE(0x1199, 0x68AA), /* Sierra Wireless Direct IP LTE modem */
+	.driver_info = (unsigned long) &sierra_net_info_direct_ip},
+	{USB_DEVICE(0x0F3D, 0x68AA), /* AT&T Direct IP LTE modem */
+	.driver_info = (unsigned long) &sierra_net_info_direct_ip},
 
 	{}, /* last item */
 };

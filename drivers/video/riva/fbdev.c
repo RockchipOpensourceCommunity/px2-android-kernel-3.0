@@ -331,7 +331,7 @@ static int riva_bl_get_brightness(struct backlight_device *bd)
 	return bd->props.brightness;
 }
 
-static struct backlight_ops riva_bl_ops = {
+static const struct backlight_ops riva_bl_ops = {
 	.get_brightness = riva_bl_get_brightness,
 	.update_status	= riva_bl_update_status,
 };
@@ -355,6 +355,7 @@ static void riva_bl_init(struct riva_par *par)
 	snprintf(name, sizeof(name), "rivabl%d", info->node);
 
 	memset(&props, 0, sizeof(struct backlight_properties));
+	props.type = BACKLIGHT_RAW;
 	props.max_brightness = FB_BACKLIGHT_LEVELS - 1;
 	bd = backlight_device_register(name, info->dev, par, &riva_bl_ops,
 				       &props);
@@ -1815,6 +1816,8 @@ static void __devinit riva_update_default_var(struct fb_var_screeninfo *var,
 			     specs->modedb, specs->modedb_len,
 			     NULL, 8);
 	} else if (specs->modedb != NULL) {
+		/* get first mode in database as fallback */
+		modedb = specs->modedb[0];
 		/* get preferred timing */
 		if (info->monspecs.misc & FB_MISC_1ST_DETAIL) {
 			int i;
@@ -1825,9 +1828,6 @@ static void __devinit riva_update_default_var(struct fb_var_screeninfo *var,
 					break;
 				}
 			}
-		} else {
-			/* otherwise, get first mode in database */
-			modedb = specs->modedb[0];
 		}
 		var->bits_per_pixel = 8;
 		riva_update_var(var, &modedb);

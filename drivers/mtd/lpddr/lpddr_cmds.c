@@ -3,7 +3,7 @@
  * erase, lock/unlock support for LPDDR flash memories
  * (C) 2008 Korolev Alexey <akorolev@infradead.org>
  * (C) 2008 Vasiliy Leonenko <vasiliy.leonenko@gmail.com>
- * Many thanks to Roman Borisov for intial enabling
+ * Many thanks to Roman Borisov for initial enabling
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -98,7 +98,7 @@ struct mtd_info *lpddr_cmdset(struct map_info *map)
 	numchips = lpddr->numchips / lpddr->qinfo->HWPartsNum;
 	for (i = 0; i < numchips; i++) {
 		shared[i].writing = shared[i].erasing = NULL;
-		spin_lock_init(&shared[i].lock);
+		mutex_init(&shared[i].lock);
 		for (j = 0; j < lpddr->qinfo->HWPartsNum; j++) {
 			*chip = lpddr->chips[i];
 			chip->start += j << lpddr->chipshift;
@@ -171,7 +171,7 @@ static int wait_for_ready(struct map_info *map, struct flchip *chip,
 			mutex_lock(&chip->mutex);
 		}
 		if (chip->erase_suspended || chip->write_suspended)  {
-			/* Suspend has occured while sleep: reset timeout */
+			/* Suspend has occurred while sleep: reset timeout */
 			timeo = reset_timeo;
 			chip->erase_suspended = chip->write_suspended = 0;
 		}
@@ -217,7 +217,7 @@ static int get_chip(struct map_info *map, struct flchip *chip, int mode)
 		 */
 		struct flchip_shared *shared = chip->priv;
 		struct flchip *contender;
-		spin_lock(&shared->lock);
+		mutex_lock(&shared->lock);
 		contender = shared->writing;
 		if (contender && contender != chip) {
 			/*
@@ -230,7 +230,7 @@ static int get_chip(struct map_info *map, struct flchip *chip, int mode)
 			 * get_chip returns success we're clear to go ahead.
 			 */
 			ret = mutex_trylock(&contender->mutex);
-			spin_unlock(&shared->lock);
+			mutex_unlock(&shared->lock);
 			if (!ret)
 				goto retry;
 			mutex_unlock(&chip->mutex);
@@ -245,7 +245,7 @@ static int get_chip(struct map_info *map, struct flchip *chip, int mode)
 				mutex_unlock(&contender->mutex);
 				return ret;
 			}
-			spin_lock(&shared->lock);
+			mutex_lock(&shared->lock);
 
 			/* We should not own chip if it is already in FL_SYNCING
 			 * state. Put contender and retry. */
@@ -261,7 +261,7 @@ static int get_chip(struct map_info *map, struct flchip *chip, int mode)
 		   Must sleep in such a case. */
 		if (mode == FL_ERASING && shared->erasing
 		    && shared->erasing->oldstate == FL_ERASING) {
-			spin_unlock(&shared->lock);
+			mutex_unlock(&shared->lock);
 			set_current_state(TASK_UNINTERRUPTIBLE);
 			add_wait_queue(&chip->wq, &wait);
 			mutex_unlock(&chip->mutex);
@@ -275,7 +275,7 @@ static int get_chip(struct map_info *map, struct flchip *chip, int mode)
 		shared->writing = chip;
 		if (mode == FL_ERASING)
 			shared->erasing = chip;
-		spin_unlock(&shared->lock);
+		mutex_unlock(&shared->lock);
 	}
 
 	ret = chip_ready(map, chip, mode);
@@ -313,12 +313,7 @@ static int chip_ready(struct map_info *map, struct flchip *chip, int mode)
 		if (ret) {
 			/* Oops. something got wrong. */
 			/* Resume and pretend we weren't here.  */
-			map_write(map, CMD(LPDDR_RESUME),
-				map->pfow_base + PFOW_COMMAND_CODE);
-			map_write(map, CMD(LPDDR_START_EXECUTION),
-				map->pfow_base + PFOW_COMMAND_EXECUTE);
-			chip->state = FL_ERASING;
-			chip->oldstate = FL_READY;
+			put_chip(map, chip);
 			printk(KERN_ERR "%s: suspend operation failed."
 					"State may be wrong \n", map->name);
 			return -EIO;
@@ -348,7 +343,7 @@ static void put_chip(struct map_info *map, struct flchip *chip)
 {
 	if (chip->priv) {
 		struct flchip_shared *shared = chip->priv;
-		spin_lock(&shared->lock);
+		mutex_lock(&shared->lock);
 		if (shared->writing == chip && chip->oldstate == FL_READY) {
 			/* We own the ability to write, but we're done */
 			shared->writing = shared->erasing;
@@ -356,7 +351,7 @@ static void put_chip(struct map_info *map, struct flchip *chip)
 				/* give back the ownership */
 				struct flchip *loaner = shared->writing;
 				mutex_lock(&loaner->mutex);
-				spin_unlock(&shared->lock);
+				mutex_unlock(&shared->lock);
 				mutex_unlock(&chip->mutex);
 				put_chip(map, loaner);
 				mutex_lock(&chip->mutex);
@@ -374,16 +369,15 @@ static void put_chip(struct map_info *map, struct flchip *chip)
 			 * Don't let the switch below mess things up since
 			 * we don't have ownership to resume anything.
 			 */
-			spin_unlock(&shared->lock);
+			mutex_unlock(&shared->lock);
 			wake_up(&chip->wq);
 			return;
 		}
-		spin_unlock(&shared->lock);
+		mutex_unlock(&shared->lock);
 	}
 
 	switch (chip->oldstate) {
 	case FL_ERASING:
-		chip->state = chip->oldstate;
 		map_write(map, CMD(LPDDR_RESUME),
 				map->pfow_base + PFOW_COMMAND_CODE);
 		map_write(map, CMD(LPDDR_START_EXECUTION),

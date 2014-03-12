@@ -236,6 +236,9 @@ extern struct sctp_globals {
 	 * bits is an indicator of when to send and window update SACK.
 	 */
 	int rwnd_update_shift;
+
+	/* Threshold for autoclose timeout, in seconds. */
+	unsigned long max_autoclose;
 } sctp_globals;
 
 #define sctp_rto_initial		(sctp_globals.rto_initial)
@@ -261,8 +264,6 @@ extern struct sctp_globals {
 #define sctp_assoc_hashsize		(sctp_globals.assoc_hashsize)
 #define sctp_assoc_hashtable		(sctp_globals.assoc_hashtable)
 #define sctp_port_hashsize		(sctp_globals.port_hashsize)
-#define sctp_port_rover			(sctp_globals.port_rover)
-#define sctp_port_alloc_lock		(sctp_globals.port_alloc_lock)
 #define sctp_port_hashtable		(sctp_globals.port_hashtable)
 #define sctp_local_addr_list		(sctp_globals.local_addr_list)
 #define sctp_local_addr_lock		(sctp_globals.addr_list_lock)
@@ -273,6 +274,7 @@ extern struct sctp_globals {
 #define sctp_auth_enable		(sctp_globals.auth_enable)
 #define sctp_checksum_disable		(sctp_globals.checksum_disable)
 #define sctp_rwnd_upd_shift		(sctp_globals.rwnd_update_shift)
+#define sctp_max_autoclose		(sctp_globals.max_autoclose)
 
 /* SCTP Socket type: UDP or TCP style. */
 typedef enum {
@@ -424,7 +426,7 @@ struct sctp_cookie {
 	__u32 adaptation_ind;
 
 	__u8 auth_random[sizeof(sctp_paramhdr_t) + SCTP_AUTH_RANDOM_LENGTH];
-	__u8 auth_hmacs[SCTP_AUTH_NUM_HMACS + 2];
+	__u8 auth_hmacs[SCTP_AUTH_NUM_HMACS * sizeof(__u16) + 2];
 	__u8 auth_chunks[sizeof(sctp_paramhdr_t) + SCTP_AUTH_MAX_CHUNKS];
 
 	/* This is a shim for my peer's INIT packet, followed by
@@ -443,7 +445,7 @@ struct sctp_signed_cookie {
 	__u8 signature[SCTP_SECRET_SIZE];
 	__u32 __pad;		/* force sctp_cookie alignment to 64 bits */
 	struct sctp_cookie c;
-} __attribute__((packed));
+} __packed;
 
 /* This is another convenience type to allocate memory for address
  * params for the maximum size and pass such structures around
@@ -488,7 +490,7 @@ typedef struct sctp_sender_hb_info {
 	union sctp_addr daddr;
 	unsigned long sent_at;
 	__u64 hb_nonce;
-} __attribute__((packed)) sctp_sender_hb_info_t;
+} __packed sctp_sender_hb_info_t;
 
 /*
  *  RFC 2960 1.3.2 Sequenced Delivery within Streams
@@ -566,19 +568,15 @@ struct sctp_af {
 					 int optname,
 					 char __user *optval,
 					 int __user *optlen);
-	struct dst_entry *(*get_dst)	(struct sctp_association *asoc,
-					 union sctp_addr *daddr,
-					 union sctp_addr *saddr);
+	void		(*get_dst)	(struct sctp_transport *t,
+					 union sctp_addr *saddr,
+					 struct flowi *fl,
+					 struct sock *sk);
 	void		(*get_saddr)	(struct sctp_sock *sk,
-					 struct sctp_association *asoc,
-					 struct dst_entry *dst,
-					 union sctp_addr *daddr,
-					 union sctp_addr *saddr);
+					 struct sctp_transport *t,
+					 struct flowi *fl);
 	void		(*copy_addrlist) (struct list_head *,
 					  struct net_device *);
-	void		(*dst_saddr)	(union sctp_addr *saddr,
-					 struct dst_entry *dst,
-					 __be16 port);
 	int		(*cmp_addr)	(const union sctp_addr *addr1,
 					 const union sctp_addr *addr2);
 	void		(*addr_copy)	(union sctp_addr *dst,
@@ -847,7 +845,7 @@ void sctp_packet_free(struct sctp_packet *);
 
 static inline int sctp_packet_empty(struct sctp_packet *packet)
 {
-	return (packet->size == packet->overhead);
+	return packet->size == packet->overhead;
 }
 
 /* This represents a remote transport address.
@@ -900,6 +898,7 @@ struct sctp_transport {
 		/* Is this structure kfree()able? */
 		malloced:1;
 
+	struct flowi fl;
 
 	/* This is the peer's IP address and port. */
 	union sctp_addr ipaddr;
@@ -1063,7 +1062,7 @@ void sctp_transport_set_owner(struct sctp_transport *,
 			      struct sctp_association *);
 void sctp_transport_route(struct sctp_transport *, union sctp_addr *,
 			  struct sctp_sock *);
-void sctp_transport_pmtu(struct sctp_transport *);
+void sctp_transport_pmtu(struct sctp_transport *, struct sock *sk);
 void sctp_transport_free(struct sctp_transport *);
 void sctp_transport_reset_timers(struct sctp_transport *);
 void sctp_transport_hold(struct sctp_transport *);
@@ -1402,7 +1401,7 @@ int sctp_has_association(const union sctp_addr *laddr,
 int sctp_verify_init(const struct sctp_association *asoc, sctp_cid_t,
 		     sctp_init_chunk_t *peer_init, struct sctp_chunk *chunk,
 		     struct sctp_chunk **err_chunk);
-int sctp_process_init(struct sctp_association *, sctp_cid_t cid,
+int sctp_process_init(struct sctp_association *, struct sctp_chunk *chunk,
 		      const union sctp_addr *peer,
 		      sctp_init_chunk_t *init, gfp_t gfp);
 __u32 sctp_generate_tag(const struct sctp_endpoint *);
@@ -1998,7 +1997,7 @@ void sctp_assoc_clean_asconf_ack_cache(const struct sctp_association *asoc);
 struct sctp_chunk *sctp_assoc_lookup_asconf_ack(
 					const struct sctp_association *asoc,
 					__be32 serial);
-
+void sctp_asconf_queue_teardown(struct sctp_association *asoc);
 
 int sctp_cmp_addr_exact(const union sctp_addr *ss1,
 			const union sctp_addr *ss2);

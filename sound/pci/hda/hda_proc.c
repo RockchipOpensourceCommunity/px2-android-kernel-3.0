@@ -54,6 +54,8 @@ static const char *get_wid_type_name(unsigned int wid_value)
 		[AC_WID_BEEP] = "Beep Generator Widget",
 		[AC_WID_VENDOR] = "Vendor Defined Widget",
 	};
+	if (wid_value == -1)
+		return "UNKNOWN Widget";
 	wid_value &= 0xf;
 	if (names[wid_value])
 		return names[wid_value];
@@ -404,7 +406,7 @@ static void print_digital_conv(struct snd_info_buffer *buffer,
 	if (digi1 & AC_DIG1_EMPHASIS)
 		snd_iprintf(buffer, " Preemphasis");
 	if (digi1 & AC_DIG1_COPYRIGHT)
-		snd_iprintf(buffer, " Copyright");
+		snd_iprintf(buffer, " Non-Copyright");
 	if (digi1 & AC_DIG1_NONAUDIO)
 		snd_iprintf(buffer, " Non-Audio");
 	if (digi1 & AC_DIG1_PROFESSIONAL)
@@ -418,7 +420,7 @@ static void print_digital_conv(struct snd_info_buffer *buffer,
 
 static const char *get_pwr_state(u32 state)
 {
-	static const char *buf[4] = {
+	static const char * const buf[4] = {
 		"D0", "D1", "D2", "D3"
 	};
 	if (state < 4)
@@ -557,7 +559,12 @@ static void print_codec_info(struct snd_info_entry *entry,
 	else
 		snd_iprintf(buffer, "Not Set\n");
 	snd_iprintf(buffer, "Address: %d\n", codec->addr);
-	snd_iprintf(buffer, "Function Id: 0x%x\n", codec->function_id);
+	if (codec->afg)
+		snd_iprintf(buffer, "AFG Function Id: 0x%x (unsol %u)\n",
+			codec->afg_function_id, codec->afg_unsol);
+	if (codec->mfg)
+		snd_iprintf(buffer, "MFG Function Id: 0x%x (unsol %u)\n",
+			codec->mfg_function_id, codec->mfg_unsol);
 	snd_iprintf(buffer, "Vendor Id: 0x%08x\n", codec->vendor_id);
 	snd_iprintf(buffer, "Subsystem Id: 0x%08x\n", codec->subsystem_id);
 	snd_iprintf(buffer, "Revision Id: 0x%x\n", codec->revision_id);

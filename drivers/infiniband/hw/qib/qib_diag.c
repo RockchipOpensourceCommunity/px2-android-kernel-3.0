@@ -136,7 +136,8 @@ static const struct file_operations diag_file_ops = {
 	.write = qib_diag_write,
 	.read = qib_diag_read,
 	.open = qib_diag_open,
-	.release = qib_diag_release
+	.release = qib_diag_release,
+	.llseek = default_llseek,
 };
 
 static atomic_t diagpkt_count = ATOMIC_INIT(0);
@@ -149,6 +150,7 @@ static ssize_t qib_diagpkt_write(struct file *fp, const char __user *data,
 static const struct file_operations diagpkt_file_ops = {
 	.owner = THIS_MODULE,
 	.write = qib_diagpkt_write,
+	.llseek = noop_llseek,
 };
 
 int qib_diag_add(struct qib_devdata *dd)
@@ -233,6 +235,7 @@ static u32 __iomem *qib_remap_ioaddr32(struct qib_devdata *dd, u32 offset,
 	u32 __iomem *krb32 = (u32 __iomem *)dd->kregbase;
 	u32 __iomem *map = NULL;
 	u32 cnt = 0;
+	u32 tot4k, offs4k;
 
 	/* First, simplest case, offset is within the first map. */
 	kreglen = (dd->kregend - dd->kregbase) * sizeof(u64);
@@ -250,7 +253,8 @@ static u32 __iomem *qib_remap_ioaddr32(struct qib_devdata *dd, u32 offset,
 	if (dd->userbase) {
 		/* If user regs mapped, they are after send, so set limit. */
 		u32 ulim = (dd->cfgctxts * dd->ureg_align) + dd->uregbase;
-		snd_lim = dd->uregbase;
+		if (!dd->piovl15base)
+			snd_lim = dd->uregbase;
 		krb32 = (u32 __iomem *)dd->userbase;
 		if (offset >= dd->uregbase && offset < ulim) {
 			map = krb32 + (offset - dd->uregbase) / sizeof(u32);
@@ -277,14 +281,14 @@ static u32 __iomem *qib_remap_ioaddr32(struct qib_devdata *dd, u32 offset,
 	/* If 4k buffers exist, account for them by bumping
 	 * appropriate limit.
 	 */
+	tot4k = dd->piobcnt4k * dd->align4k;
+	offs4k = dd->piobufbase >> 32;
 	if (dd->piobcnt4k) {
-		u32 tot4k = dd->piobcnt4k * dd->align4k;
-		u32 offs4k = dd->piobufbase >> 32;
 		if (snd_bottom > offs4k)
 			snd_bottom = offs4k;
 		else {
 			/* 4k above 2k. Bump snd_lim, if needed*/
-			if (!dd->userbase)
+			if (!dd->userbase || dd->piovl15base)
 				snd_lim = offs4k + tot4k;
 		}
 	}
@@ -296,6 +300,15 @@ static u32 __iomem *qib_remap_ioaddr32(struct qib_devdata *dd, u32 offset,
 		offset -= snd_bottom;
 		map = (u32 __iomem *)dd->piobase + (offset / sizeof(u32));
 		cnt = snd_lim - offset;
+	}
+
+	if (!map && offs4k && dd->piovl15base) {
+		snd_lim = offs4k + tot4k + 2 * dd->align4k;
+		if (offset >= (offs4k + tot4k) && offset < snd_lim) {
+			map = (u32 __iomem *)dd->piovl15base +
+				((offset - (offs4k + tot4k)) / sizeof(u32));
+			cnt = snd_lim - offset;
+		}
 	}
 
 mapped:

@@ -15,7 +15,7 @@
 #include <linux/notifier.h>
 #include <linux/smp.h>
 #include <linux/oprofile.h>
-#include <linux/sysdev.h>
+#include <linux/syscore_ops.h>
 #include <linux/slab.h>
 #include <linux/moduleparam.h>
 #include <linux/kdebug.h>
@@ -49,9 +49,13 @@ u64 op_x86_get_ctrl(struct op_x86_model_spec const *model,
 	val |= counter_config->user ? ARCH_PERFMON_EVENTSEL_USR : 0;
 	val |= counter_config->kernel ? ARCH_PERFMON_EVENTSEL_OS : 0;
 	val |= (counter_config->unit_mask & 0xFF) << 8;
+	counter_config->extra &= (ARCH_PERFMON_EVENTSEL_INV |
+				  ARCH_PERFMON_EVENTSEL_EDGE |
+				  ARCH_PERFMON_EVENTSEL_CMASK);
+	val |= counter_config->extra;
 	event &= model->event_mask ? model->event_mask : 0xFF;
 	val |= event & 0xFF;
-	val |= (event & 0x0F00) << 24;
+	val |= (u64)(event & 0x0F00) << 24;
 
 	return val;
 }
@@ -65,7 +69,6 @@ static int profile_exceptions_notify(struct notifier_block *self,
 
 	switch (val) {
 	case DIE_NMI:
-	case DIE_NMI_IPI:
 		if (ctr_running)
 			model->check_ctrs(args->regs, &__get_cpu_var(cpu_msrs));
 		else if (!nmi_enabled)
@@ -109,8 +112,10 @@ static void nmi_cpu_start(void *dummy)
 static int nmi_start(void)
 {
 	get_online_cpus();
-	on_each_cpu(nmi_cpu_start, NULL, 1);
 	ctr_running = 1;
+	/* make ctr_running visible to the nmi handler: */
+	smp_mb();
+	on_each_cpu(nmi_cpu_start, NULL, 1);
 	put_online_cpus();
 	return 0;
 }
@@ -143,7 +148,7 @@ static inline int has_mux(void)
 
 inline int op_x86_phys_to_virt(int phys)
 {
-	return __get_cpu_var(switch_index) + phys;
+	return __this_cpu_read(switch_index) + phys;
 }
 
 inline int op_x86_virt_to_phys(int virt)
@@ -361,7 +366,7 @@ static void nmi_cpu_setup(void *dummy)
 static struct notifier_block profile_exceptions_nb = {
 	.notifier_call = profile_exceptions_notify,
 	.next = NULL,
-	.priority = 2
+	.priority = NMI_LOCAL_LOW_PRIOR,
 };
 
 static void nmi_cpu_restore_registers(struct op_msrs *msrs)
@@ -441,6 +446,7 @@ static int nmi_create_files(struct super_block *sb, struct dentry *root)
 		oprofilefs_create_ulong(sb, dir, "unit_mask", &counter_config[i].unit_mask);
 		oprofilefs_create_ulong(sb, dir, "kernel", &counter_config[i].kernel);
 		oprofilefs_create_ulong(sb, dir, "user", &counter_config[i].user);
+		oprofilefs_create_ulong(sb, dir, "extra", &counter_config[i].extra);
 	}
 
 	return 0;
@@ -500,15 +506,18 @@ static int nmi_setup(void)
 
 	nmi_enabled = 0;
 	ctr_running = 0;
-	barrier();
+	/* make variables visible to the nmi handler: */
+	smp_mb();
 	err = register_die_notifier(&profile_exceptions_nb);
 	if (err)
 		goto fail;
 
 	get_online_cpus();
 	register_cpu_notifier(&oprofile_cpu_nb);
-	on_each_cpu(nmi_cpu_setup, NULL, 1);
 	nmi_enabled = 1;
+	/* make nmi_enabled visible to the nmi handler: */
+	smp_mb();
+	on_each_cpu(nmi_cpu_setup, NULL, 1);
 	put_online_cpus();
 
 	return 0;
@@ -527,7 +536,8 @@ static void nmi_shutdown(void)
 	nmi_enabled = 0;
 	ctr_running = 0;
 	put_online_cpus();
-	barrier();
+	/* make variables visible to the nmi handler: */
+	smp_mb();
 	unregister_die_notifier(&profile_exceptions_nb);
 	msrs = &get_cpu_var(cpu_msrs);
 	model->shutdown(msrs);
@@ -537,7 +547,7 @@ static void nmi_shutdown(void)
 
 #ifdef CONFIG_PM
 
-static int nmi_suspend(struct sys_device *dev, pm_message_t state)
+static int nmi_suspend(void)
 {
 	/* Only one CPU left, just stop that one */
 	if (nmi_enabled == 1)
@@ -545,43 +555,32 @@ static int nmi_suspend(struct sys_device *dev, pm_message_t state)
 	return 0;
 }
 
-static int nmi_resume(struct sys_device *dev)
+static void nmi_resume(void)
 {
 	if (nmi_enabled == 1)
 		nmi_cpu_start(NULL);
-	return 0;
 }
 
-static struct sysdev_class oprofile_sysclass = {
-	.name		= "oprofile",
+static struct syscore_ops oprofile_syscore_ops = {
 	.resume		= nmi_resume,
 	.suspend	= nmi_suspend,
 };
 
-static struct sys_device device_oprofile = {
-	.id	= 0,
-	.cls	= &oprofile_sysclass,
-};
-
-static int __init init_sysfs(void)
+static void __init init_suspend_resume(void)
 {
-	int error;
-
-	error = sysdev_class_register(&oprofile_sysclass);
-	if (!error)
-		error = sysdev_register(&device_oprofile);
-	return error;
+	register_syscore_ops(&oprofile_syscore_ops);
 }
 
-static void exit_sysfs(void)
+static void exit_suspend_resume(void)
 {
-	sysdev_unregister(&device_oprofile);
-	sysdev_class_unregister(&oprofile_sysclass);
+	unregister_syscore_ops(&oprofile_syscore_ops);
 }
 
 #else
-#define init_sysfs() do { } while (0)
-#define exit_sysfs() do { } while (0)
+
+static inline void init_suspend_resume(void) { }
+static inline void exit_suspend_resume(void) { }
+
 #endif /* CONFIG_PM */
 
 static int __init p4_init(char **cpu_type)
@@ -634,6 +633,18 @@ static int __init ppro_init(char **cpu_type)
 	if (force_arch_perfmon && cpu_has_arch_perfmon)
 		return 0;
 
+	/*
+	 * Documentation on identifying Intel processors by CPU family
+	 * and model can be found in the Intel Software Developer's
+	 * Manuals (SDM):
+	 *
+	 *  http://www.intel.com/products/processor/manuals/
+	 *
+	 * As of May 2010 the documentation for this was in the:
+	 * "Intel 64 and IA-32 Architectures Software Developer's
+	 * Manual Volume 3B: System Programming Guide", "Table B-1
+	 * CPUID Signature Values of DisplayFamily_DisplayModel".
+	 */
 	switch (cpu_model) {
 	case 0 ... 2:
 		*cpu_type = "i386/ppro";
@@ -652,15 +663,19 @@ static int __init ppro_init(char **cpu_type)
 	case 14:
 		*cpu_type = "i386/core";
 		break;
-	case 15: case 23:
+	case 0x0f:
+	case 0x16:
+	case 0x17:
+	case 0x1d:
 		*cpu_type = "i386/core_2";
 		break;
+	case 0x1a:
+	case 0x1e:
 	case 0x2e:
-	case 26:
 		spec = &op_arch_perfmon_spec;
 		*cpu_type = "i386/core_i7";
 		break;
-	case 28:
+	case 0x1c:
 		*cpu_type = "i386/atom";
 		break;
 	default:
@@ -671,9 +686,6 @@ static int __init ppro_init(char **cpu_type)
 	model = spec;
 	return 1;
 }
-
-/* in order to get sysfs right */
-static int using_nmi;
 
 int __init op_nmi_init(struct oprofile_operations *ops)
 {
@@ -705,6 +717,15 @@ int __init op_nmi_init(struct oprofile_operations *ops)
 			break;
 		case 0x11:
 			cpu_type = "x86-64/family11h";
+			break;
+		case 0x12:
+			cpu_type = "x86-64/family12h";
+			break;
+		case 0x14:
+			cpu_type = "x86-64/family14h";
+			break;
+		case 0x15:
+			cpu_type = "x86-64/family15h";
 			break;
 		default:
 			return -ENODEV;
@@ -761,14 +782,13 @@ int __init op_nmi_init(struct oprofile_operations *ops)
 
 	mux_init(ops);
 
-	init_sysfs();
-	using_nmi = 1;
+	init_suspend_resume();
+
 	printk(KERN_INFO "oprofile: using NMI interrupt.\n");
 	return 0;
 }
 
 void op_nmi_exit(void)
 {
-	if (using_nmi)
-		exit_sysfs();
+	exit_suspend_resume();
 }

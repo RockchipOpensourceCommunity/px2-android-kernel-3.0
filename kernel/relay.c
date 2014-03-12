@@ -70,17 +70,10 @@ static const struct vm_operations_struct relay_file_mmap_ops = {
  */
 static struct page **relay_alloc_page_array(unsigned int n_pages)
 {
-	struct page **array;
-	size_t pa_size = n_pages * sizeof(struct page *);
-
-	if (pa_size > PAGE_SIZE) {
-		array = vmalloc(pa_size);
-		if (array)
-			memset(array, 0, pa_size);
-	} else {
-		array = kzalloc(pa_size, GFP_KERNEL);
-	}
-	return array;
+	const size_t pa_size = n_pages * sizeof(struct page *);
+	if (pa_size > PAGE_SIZE)
+		return vzalloc(pa_size);
+	return kzalloc(pa_size, GFP_KERNEL);
 }
 
 /*
@@ -171,10 +164,14 @@ depopulate:
  */
 static struct rchan_buf *relay_create_buf(struct rchan *chan)
 {
-	struct rchan_buf *buf = kzalloc(sizeof(struct rchan_buf), GFP_KERNEL);
-	if (!buf)
+	struct rchan_buf *buf;
+
+	if (chan->n_subbufs > UINT_MAX / sizeof(size_t *))
 		return NULL;
 
+	buf = kzalloc(sizeof(struct rchan_buf), GFP_KERNEL);
+	if (!buf)
+		return NULL;
 	buf->padding = kmalloc(chan->n_subbufs * sizeof(size_t *), GFP_KERNEL);
 	if (!buf->padding)
 		goto free_buf;
@@ -580,6 +577,8 @@ struct rchan *relay_open(const char *base_filename,
 	struct rchan *chan;
 
 	if (!(subbuf_size && n_subbufs))
+		return NULL;
+	if (subbuf_size > UINT_MAX / n_subbufs)
 		return NULL;
 
 	chan = kzalloc(sizeof(struct rchan), GFP_KERNEL);

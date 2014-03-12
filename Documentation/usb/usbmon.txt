@@ -12,6 +12,10 @@ Controller Drivers (HCD). So, if HCD is buggy, the traces reported by
 usbmon may not correspond to bus transactions precisely. This is the same
 situation as with tcpdump.
 
+Two APIs are currently implemented: "text" and "binary". The binary API
+is available through a character device in /dev namespace and is an ABI.
+The text API is deprecated since 2.6.35, but available for convenience.
+
 * How to use usbmon to collect raw text traces
 
 Unlike the packet socket, usbmon has an interface which provides traces
@@ -43,10 +47,11 @@ This allows to filter away annoying devices that talk continuously.
 
 2. Find which bus connects to the desired device
 
-Run "cat /proc/bus/usb/devices", and find the T-line which corresponds to
-the device. Usually you do it by looking for the vendor string. If you have
-many similar devices, unplug one and compare two /proc/bus/usb/devices outputs.
-The T-line will have a bus number. Example:
+Run "cat /sys/kernel/debug/usb/devices", and find the T-line which corresponds
+to the device. Usually you do it by looking for the vendor string. If you have
+many similar devices, unplug one and compare the two
+/sys/kernel/debug/usb/devices outputs. The T-line will have a bus number.
+Example:
 
 T:  Bus=03 Lev=01 Prnt=01 Port=00 Cnt=01 Dev#=  2 Spd=12  MxCh= 0
 D:  Ver= 1.10 Cls=00(>ifc ) Sub=00 Prot=00 MxPS= 8 #Cfgs=  1
@@ -54,7 +59,10 @@ P:  Vendor=0557 ProdID=2004 Rev= 1.00
 S:  Manufacturer=ATEN
 S:  Product=UC100KM V2.00
 
-Bus=03 means it's bus 3.
+"Bus=03" means it's bus 3. Alternatively, you can look at the output from
+"lsusb" and get the bus number from the appropriate line. Example:
+
+Bus 003 Device 002: ID 0557:2004 ATEN UC100KM V2.00
 
 3. Start 'cat'
 
@@ -162,39 +170,11 @@ Here is the list of words, from left to right:
   not machine words, but really just a byte stream split into words to make
   it easier to read. Thus, the last word may contain from one to four bytes.
   The length of collected data is limited and can be less than the data length
-  report in Data Length word.
-
-Here is an example of code to read the data stream in a well known programming
-language:
-
-class ParsedLine {
-	int data_len;		/* Available length of data */
-	byte data[];
-
-	void parseData(StringTokenizer st) {
-		int availwords = st.countTokens();
-		data = new byte[availwords * 4];
-		data_len = 0;
-		while (st.hasMoreTokens()) {
-			String data_str = st.nextToken();
-			int len = data_str.length() / 2;
-			int i;
-			int b;	// byte is signed, apparently?! XXX
-			for (i = 0; i < len; i++) {
-				// data[data_len] = Byte.parseByte(
-				//     data_str.substring(i*2, i*2 + 2),
-				//     16);
-				b = Integer.parseInt(
-				     data_str.substring(i*2, i*2 + 2),
-				     16);
-				if (b >= 128)
-					b *= -1;
-				data[data_len] = (byte) b;
-				data_len++;
-			}
-		}
-	}
-}
+  reported in the Data Length word. In the case of an Isochronous input (Zi)
+  completion where the received data is sparse in the buffer, the length of
+  the collected data can be greater than the Data Length value (because Data
+  Length counts only the bytes that were received whereas the Data words
+  contain the entire transfer buffer).
 
 Examples:
 

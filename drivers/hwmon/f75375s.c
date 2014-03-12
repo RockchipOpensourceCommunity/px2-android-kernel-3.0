@@ -6,10 +6,10 @@
  * Datasheets available at:
  *
  * f75375:
- * http://www.fintek.com.tw/files/productfiles/2005111152950.pdf
+ * http://www.fintek.com.tw/files/productfiles/F75375_V026P.pdf 
  *
  * f75373:
- * http://www.fintek.com.tw/files/productfiles/2005111153128.pdf
+ * http://www.fintek.com.tw/files/productfiles/F75373_V025P.pdf
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -79,7 +79,7 @@ enum chips { f75373, f75375 };
 #define F75375_REG_PWM2_DROP_DUTY	0x6C
 
 #define FAN_CTRL_LINEAR(nr)		(4 + nr)
-#define FAN_CTRL_MODE(nr)		(5 + ((nr) * 2))
+#define FAN_CTRL_MODE(nr)		(4 + ((nr) * 2))
 
 /*
  * Data structures and manipulation thereof
@@ -159,7 +159,7 @@ static inline void f75375_write8(struct i2c_client *client, u8 reg,
 static inline void f75375_write16(struct i2c_client *client, u8 reg,
 		u16 value)
 {
-	int err = i2c_smbus_write_byte_data(client, reg, (value << 8));
+	int err = i2c_smbus_write_byte_data(client, reg, (value >> 8));
 	if (err)
 		return;
 	i2c_smbus_write_byte_data(client, reg + 1, (value & 0xFF));
@@ -298,26 +298,27 @@ static int set_pwm_enable_direct(struct i2c_client *client, int nr, int val)
 		return -EINVAL;
 
 	fanmode = f75375_read8(client, F75375_REG_FAN_TIMER);
-	fanmode = ~(3 << FAN_CTRL_MODE(nr));
+	fanmode &= ~(3 << FAN_CTRL_MODE(nr));
 
 	switch (val) {
 	case 0: /* Full speed */
 		fanmode  |= (3 << FAN_CTRL_MODE(nr));
 		data->pwm[nr] = 255;
-		f75375_write8(client, F75375_REG_FAN_PWM_DUTY(nr),
-				data->pwm[nr]);
 		break;
 	case 1: /* PWM */
 		fanmode  |= (3 << FAN_CTRL_MODE(nr));
 		break;
 	case 2: /* AUTOMATIC*/
-		fanmode  |= (2 << FAN_CTRL_MODE(nr));
+		fanmode  |= (1 << FAN_CTRL_MODE(nr));
 		break;
 	case 3: /* fan speed */
 		break;
 	}
 	f75375_write8(client, F75375_REG_FAN_TIMER, fanmode);
 	data->pwm_enable[nr] = val;
+	if (val == 0)
+		f75375_write8(client, F75375_REG_FAN_PWM_DUTY(nr),
+				data->pwm[nr]);
 	return 0;
 }
 
@@ -350,7 +351,7 @@ static ssize_t set_pwm_mode(struct device *dev, struct device_attribute *attr,
 
 	mutex_lock(&data->update_lock);
 	conf = f75375_read8(client, F75375_REG_CONFIG1);
-	conf = ~(1 << FAN_CTRL_LINEAR(nr));
+	conf &= ~(1 << FAN_CTRL_LINEAR(nr));
 
 	if (val == 0)
 		conf |= (1 << FAN_CTRL_LINEAR(nr)) ;

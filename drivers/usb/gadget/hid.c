@@ -69,9 +69,9 @@ static struct usb_device_descriptor device_desc = {
 	/* .bDeviceClass =		USB_CLASS_COMM, */
 	/* .bDeviceSubClass =	0, */
 	/* .bDeviceProtocol =	0, */
-	.bDeviceClass =		0xEF,
-	.bDeviceSubClass =	2,
-	.bDeviceProtocol =	1,
+	.bDeviceClass =		USB_CLASS_PER_INTERFACE,
+	.bDeviceSubClass =	0,
+	.bDeviceProtocol =	0,
 	/* .bMaxPacketSize0 = f(hardware) */
 
 	/* Vendor and product id can be overridden by module parameters.  */
@@ -148,7 +148,6 @@ static int __init do_config(struct usb_configuration *c)
 
 static struct usb_configuration config_driver = {
 	.label			= "HID Gadget",
-	.bind			= do_config,
 	.bConfigurationValue	= 1,
 	/* .iConfiguration = DYNAMIC */
 	.bmAttributes		= USB_CONFIG_ATT_SELFPOWER,
@@ -201,7 +200,7 @@ static int __init hid_bind(struct usb_composite_dev *cdev)
 	device_desc.iProduct = status;
 
 	/* register our configuration */
-	status = usb_add_config(cdev, &config_driver);
+	status = usb_add_config(cdev, &config_driver, do_config);
 	if (status < 0)
 		return status;
 
@@ -256,7 +255,6 @@ static struct usb_composite_driver hidg_driver = {
 	.name		= "g_hid",
 	.dev		= &device_desc,
 	.strings	= dev_strings,
-	.bind		= hid_bind,
 	.unbind		= __exit_p(hid_unbind),
 };
 
@@ -282,7 +280,7 @@ static int __init hidg_init(void)
 	if (status < 0)
 		return status;
 
-	status = usb_composite_register(&hidg_driver);
+	status = usb_composite_probe(&hidg_driver, hid_bind);
 	if (status < 0)
 		platform_driver_unregister(&hidg_plat_driver);
 

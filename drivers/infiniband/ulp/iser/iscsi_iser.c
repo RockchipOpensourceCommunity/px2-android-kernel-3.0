@@ -354,6 +354,9 @@ iscsi_iser_conn_bind(struct iscsi_cls_session *cls_session,
 	}
 	ib_conn = ep->dd_data;
 
+	if (iser_alloc_rx_descriptors(ib_conn))
+		return -ENOMEM;
+
 	/* binds the iSER connection retrieved from the previously
 	 * connected ep_handle to the iSCSI layer connection. exchanges
 	 * connection pointers */
@@ -386,19 +389,6 @@ iscsi_iser_conn_stop(struct iscsi_cls_conn *cls_conn, int flag)
 		iser_conn_put(ib_conn, 1); /* deref iscsi/ib conn unbinding */
 	}
 	iser_conn->ib_conn = NULL;
-}
-
-static int
-iscsi_iser_conn_start(struct iscsi_cls_conn *cls_conn)
-{
-	struct iscsi_conn *conn = cls_conn->dd_data;
-	int err;
-
-	err = iser_conn_set_full_featured_mode(conn);
-	if (err)
-		return err;
-
-	return iscsi_conn_start(cls_conn);
 }
 
 static void iscsi_iser_session_destroy(struct iscsi_cls_session *cls_session)
@@ -532,6 +522,29 @@ iscsi_iser_conn_get_stats(struct iscsi_cls_conn *cls_conn, struct iscsi_stats *s
 	stats->custom[3].value = conn->fmr_unalign_cnt;
 }
 
+static int iscsi_iser_get_ep_param(struct iscsi_endpoint *ep,
+				   enum iscsi_param param, char *buf)
+{
+	struct iser_conn *ib_conn = ep->dd_data;
+	int len;
+
+	switch (param) {
+	case ISCSI_PARAM_CONN_PORT:
+	case ISCSI_PARAM_CONN_ADDRESS:
+		if (!ib_conn || !ib_conn->cma_id)
+			return -ENOTCONN;
+
+		return iscsi_conn_get_addr_param((struct sockaddr_storage *)
+					&ib_conn->cma_id->route.addr.dst_addr,
+					param, buf);
+		break;
+	default:
+		return -ENOSYS;
+	}
+
+	return len;
+}
+
 static struct iscsi_endpoint *
 iscsi_iser_ep_connect(struct Scsi_Host *shost, struct sockaddr *dst_addr,
 		      int non_blocking)
@@ -637,6 +650,8 @@ static struct iscsi_transport iscsi_iser_transport = {
 				  ISCSI_MAX_BURST |
 				  ISCSI_PDU_INORDER_EN |
 				  ISCSI_DATASEQ_INORDER_EN |
+				  ISCSI_CONN_PORT |
+				  ISCSI_CONN_ADDRESS |
 				  ISCSI_EXP_STATSN |
 				  ISCSI_PERSISTENT_PORT |
 				  ISCSI_PERSISTENT_ADDRESS |
@@ -659,8 +674,9 @@ static struct iscsi_transport iscsi_iser_transport = {
 	.destroy_conn           = iscsi_iser_conn_destroy,
 	.set_param              = iscsi_iser_set_param,
 	.get_conn_param		= iscsi_conn_get_param,
+	.get_ep_param		= iscsi_iser_get_ep_param,
 	.get_session_param	= iscsi_session_get_param,
-	.start_conn             = iscsi_iser_conn_start,
+	.start_conn             = iscsi_conn_start,
 	.stop_conn              = iscsi_iser_conn_stop,
 	/* iscsi host params */
 	.get_host_param		= iscsi_host_get_param,

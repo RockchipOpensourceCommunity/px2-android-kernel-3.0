@@ -166,7 +166,7 @@ void i2400m_wake_tx_work(struct work_struct *ws)
 	d_fnstart(3, dev, "(ws %p i2400m %p skb %p)\n", ws, i2400m, skb);
 	result = -EINVAL;
 	if (skb == NULL) {
-		dev_err(dev, "WAKE&TX: skb dissapeared!\n");
+		dev_err(dev, "WAKE&TX: skb disappeared!\n");
 		goto out_put;
 	}
 	/* If we have, somehow, lost the connection after this was
@@ -606,7 +606,8 @@ static void i2400m_get_drvinfo(struct net_device *net_dev,
 	struct i2400m *i2400m = net_dev_to_i2400m(net_dev);
 
 	strncpy(info->driver, KBUILD_MODNAME, sizeof(info->driver) - 1);
-	strncpy(info->fw_version, i2400m->fw_name, sizeof(info->fw_version) - 1);
+	strncpy(info->fw_version,
+	        i2400m->fw_name ? : "", sizeof(info->fw_version) - 1);
 	if (net_dev->dev.parent)
 		strncpy(info->bus_info, dev_name(net_dev->dev.parent),
 			sizeof(info->bus_info) - 1);

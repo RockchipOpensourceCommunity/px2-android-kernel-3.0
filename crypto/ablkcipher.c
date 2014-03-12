@@ -141,8 +141,7 @@ err:
 
 	if (walk->iv != req->info)
 		memcpy(req->info, walk->iv, tfm->crt_ablkcipher.ivsize);
-	if (walk->iv_buffer)
-		kfree(walk->iv_buffer);
+	kfree(walk->iv_buffer);
 
 	return err;
 }
@@ -165,7 +164,7 @@ static inline int ablkcipher_next_slow(struct ablkcipher_request *req,
 
 	p = kmalloc(n, GFP_ATOMIC);
 	if (!p)
-		ablkcipher_walk_done(req, walk, -ENOMEM);
+		return ablkcipher_walk_done(req, walk, -ENOMEM);
 
 	base = p + 1;
 

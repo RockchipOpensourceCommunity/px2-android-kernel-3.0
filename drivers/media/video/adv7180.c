@@ -17,20 +17,44 @@
  */
 
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/errno.h>
-#include <linux/kernel.h>
 #include <linux/interrupt.h>
 #include <linux/i2c.h>
-#include <linux/i2c-id.h>
 #include <linux/slab.h>
 #include <media/v4l2-ioctl.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-chip-ident.h>
 #include <linux/mutex.h>
+#include <linux/delay.h>
+#include <media/soc_camera.h>
+#include <linux/platform_device.h>
+#include <plat/rk_camera.h>
+#include <mach/iomux.h>
+#include <mach/io.h>
+#include <mach/gpio.h>
 
-#define DRIVER_NAME "adv7180"
+//#ifndef DEBUG
+#define DEBUG
+//#endif
+
+#ifdef DEBUG
+#define DBG(format, ...) \
+		printk(KERN_INFO "ADV7180: " format "\n", ## __VA_ARGS__)
+#else
+#define DBG(format, ...)
+#endif
+
+#define _CONS(a,b) a##b
+#define CONS(a,b) _CONS(a,b)
+
+#define __STR(x) #x
+#define _STR(x) __STR(x)
+#define STR(x) _STR(x)
+#define SENSOR_NAME RK29_CAM_SENSOR_ADV7180
+#define SENSOR_NAME_STRING(a) STR(CONS(SENSOR_NAME, a))
+
+#define DRIVER_NAME SENSOR_NAME_STRING()
 
 #define ADV7180_INPUT_CONTROL_REG			0x00
 #define ADV7180_INPUT_CONTROL_AD_PAL_BG_NTSC_J_SECAM	0x00
@@ -51,7 +75,7 @@
 #define ADV7180_INPUT_CONTROL_PAL_SECAM_PED		0xf0
 
 #define ADV7180_EXTENDED_OUTPUT_CONTROL_REG		0x04
-#define ADV7180_EXTENDED_OUTPUT_CONTROL_NTSCDIS		0xC5
+#define ADV7180_EXTENDED_OUTPUT_CONTROL_NTSCDIS		0xC4// 0xCC
 
 #define ADV7180_AUTODETECT_ENABLE_REG			0x07
 #define ADV7180_AUTODETECT_DEFAULT			0x7f
@@ -72,7 +96,7 @@
 #define ADV7180_STATUS1_AUTOD_SECAM_525	0x70
 
 #define ADV7180_IDENT_REG 0x11
-#define ADV7180_ID_7180 0x18
+#define ADV7180_ID_7180 0x1c
 
 #define ADV7180_ICONF1_ADI		0x40
 #define ADV7180_ICONF1_ACTIVE_LOW	0x01
@@ -91,13 +115,74 @@
 #define ADV7180_IMR3_ADI	0x4C
 #define ADV7180_IMR4_ADI	0x50
 
+#define ADV7180_POLARITY_REG		0x37
+#define ADV7180_PCLK_NORMAIL	(1 << 0)
+#define ADV7180_PFIEID_LOW		(1 << 3)
+#define ADV7180_PVSYNC_LOW		(1 << 5)
+#define ADV7180_PHSYNC_LOW		(1 << 7)
+
+#define ADV7180_VS_FIELD_PIN_REG	0x58
+#define ADV7180_VS_OUTPUT	0x01
+
+#define ADV7180_CVBS_IN_DET RK30_PIN6_PA0
+#define ADV7180_YCRCB_IN_DET RK30_PIN0_PB7
+
+
+struct adv7180_init_array {
+	u8 reg;
+	u8 val;
+};
+
+struct adv7180_init_array init_cvbs[18]=
+{	
+	{0x00,0x00},
+	{0x04,0x57},
+	{0x17,0x41},
+	{0x31,0x02},
+	{0x3D,0xA2},
+	{0x3E,0x6A},
+	{0x3F,0xA0},
+	{0x0E,0x80},
+	{0x55,0x81},
+	{0x0E,0x00},
+	{0x00,0x1C},
+	{0x01,0x00},
+	{0x80,0x10},
+	{0x82,0xC9},
+	{0x87,0x20},
+	{0x88,0x00}
+
+};
+
+struct adv7180_init_array init_ycrcb[17]=
+{	
+	{0x00, 0x09},
+	{0x31, 0x02},
+	{0x3D, 0xA2},
+	{0x3E, 0x6A},
+	{0x3F, 0xA0},
+	{0x54, 0x4E},
+	{0x0E, 0x80},
+	{0x55, 0x81},
+	{0x0E, 0x00},
+	{0x00, 0x1C},
+	{0x01, 0x00},
+	{0x80, 0x10},
+	{0x82, 0xC9},
+	{0x87, 0x20},
+	{0x88, 0x00}
+};
+
 struct adv7180_state {
 	struct v4l2_subdev	sd;
-	struct work_struct	work;
+	struct work_struct	ycrcb_work;
+	struct work_struct	cvbs_work;
 	struct mutex		mutex; /* mutual excl. when accessing chip */
-	int			irq;
+	int			cvbs_irq;
+	int         ycrcb_irq;
 	v4l2_std_id		curr_norm;
 	bool			autodetect;
+	struct soc_camera_device *icd;
 };
 
 static v4l2_std_id adv7180_std_to_v4l2(u8 status1)
@@ -176,6 +261,23 @@ static inline struct adv7180_state *to_state(struct v4l2_subdev *sd)
 	return container_of(sd, struct adv7180_state, sd);
 }
 
+static void adv7180_pwr_ctl(struct soc_camera_device *icd, bool onoff)
+{
+	return ;
+	struct soc_camera_link *icl = to_soc_camera_link(icd);
+	int enable;
+	
+	if(onoff == 0)
+		enable = 1;
+	else
+		enable = 0;
+		
+	if (icl->powerdown) {
+		icl->powerdown(icd->pdev, enable);
+		msleep(10);
+	}
+}
+
 static int adv7180_querystd(struct v4l2_subdev *sd, v4l2_std_id *std)
 {
 	struct adv7180_state *state = to_state(sd);
@@ -184,9 +286,9 @@ static int adv7180_querystd(struct v4l2_subdev *sd, v4l2_std_id *std)
 		return err;
 
 	/* when we are interrupt driven we know the state */
-	if (!state->autodetect || state->irq > 0)
-		*std = state->curr_norm;
-	else
+	//if (!state->autodetect || state->irq > 0)
+	//	*std = state->curr_norm;
+	//else
 		err = __adv7180_status(v4l2_get_subdevdata(sd), NULL, std);
 
 	mutex_unlock(&state->mutex);
@@ -203,6 +305,69 @@ static int adv7180_g_input_status(struct v4l2_subdev *sd, u32 *status)
 	ret = __adv7180_status(v4l2_get_subdevdata(sd), status, NULL);
 	mutex_unlock(&state->mutex);
 	return ret;
+}
+
+static int adv7180_v412_init(struct v4l2_subdev *sd, u32 val)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+    struct soc_camera_device *icd = client->dev.platform_data;
+	struct adv7180_state *state = to_state(sd);
+    int ret;
+    
+	DBG("%s val %d", __FUNCTION__, val);
+	adv7180_pwr_ctl(icd, 1);
+	
+	/* Initialize adv7180 */
+	/* Enable autodetection */
+	ret = i2c_smbus_write_byte_data(client, ADV7180_INPUT_CONTROL_REG,
+		ADV7180_INPUT_CONTROL_AD_PAL_BG_NTSC_J_SECAM_PED);
+	if (ret < 0)
+		goto err_unreg_subdev;
+
+	ret = i2c_smbus_write_byte_data(client, ADV7180_AUTODETECT_ENABLE_REG,
+		ADV7180_AUTODETECT_DEFAULT);
+	if (ret < 0)
+		goto err_unreg_subdev;
+
+	/* ITU-R BT.656-4 compatible */
+	ret = i2c_smbus_write_byte_data(client,
+		ADV7180_EXTENDED_OUTPUT_CONTROL_REG,
+		ADV7180_EXTENDED_OUTPUT_CONTROL_NTSCDIS);
+	if (ret < 0)
+		goto err_unreg_subdev;
+
+	/* set vs/field pin output vsync */
+	ret = i2c_smbus_write_byte_data(client,
+		ADV7180_VS_FIELD_PIN_REG,
+		ADV7180_VS_OUTPUT);
+	if (ret < 0)
+		goto err_unreg_subdev;
+	
+	/* set vs/hs polarity */
+//	ret = i2c_smbus_write_byte_data(client,
+//		ADV7180_POLARITY_REG,
+//		ADV7180_PCLK_NORMAIL | ADV7180_PVSYNC_LOW | ADV7180_PHSYNC_LOW);
+//	if (ret < 0)
+//		goto err_unreg_subdev;
+	
+	msleep(100);
+	/* read current norm */
+	__adv7180_status(client, NULL, &state->curr_norm);
+
+	return 0;
+	
+err_unreg_subdev:
+	return ret;
+}
+
+static long adv7180_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+    struct soc_camera_device *icd = client->dev.platform_data;
+	DBG("%s cmd %x", __FUNCTION__, cmd);
+	if(cmd == RK29_CAM_SUBDEV_DEACTIVATE)
+		adv7180_pwr_ctl(icd, 0);
+	return 0;
 }
 
 static int adv7180_g_chip_ident(struct v4l2_subdev *sd,
@@ -250,12 +415,174 @@ out:
 	return ret;
 }
 
+struct adv7180_datafmt {
+	enum v4l2_mbus_pixelcode code;
+	enum v4l2_colorspace colorspace;
+};
+
+struct adv7180_picsize {
+	unsigned int width;
+	unsigned int height;
+};
+
+static const struct adv7180_picsize adv7180_pic_sizes[] = {
+	//Default
+	{720, 480},
+	//NTSC
+	{720, 506},
+	//{720, 480},
+	//PAL
+	{720, 576},
+	
+};
+
+static const struct adv7180_datafmt adv7180_colour_fmts[] = {
+    {V4L2_MBUS_FMT_UYVY8_2X8, V4L2_COLORSPACE_SMPTE170M},
+};
+
+static int adv7180_set_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
+{
+	struct adv7180_state *state = to_state(sd);
+	int index = 0;
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	
+	DBG("%s width %d height %d code 0x%x colorspace 0x%x",
+		__FUNCTION__, mf->width, mf->height, mf->code, mf->colorspace);
+		
+	__adv7180_status(client, NULL, &state->curr_norm);	
+	
+	if(state->curr_norm == V4L2_STD_PAL)
+		index = 2;
+	else if(state->curr_norm == V4L2_STD_NTSC)
+		index = 1;
+	else
+		index = 0;
+	
+	mf->width	= adv7180_pic_sizes[index].width;
+	mf->height	= adv7180_pic_sizes[index].height;
+	
+	DBG("%s index:%d mf->width %d mf->height %d code 0x%x colorspace 0x%x",
+		__FUNCTION__,index, mf->width, mf->height, mf->code, mf->colorspace);
+	return 0;
+}
+
+static int adv7180_get_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
+{
+	mf->width	= adv7180_pic_sizes[0].width;
+	mf->height	= adv7180_pic_sizes[0].height;
+	mf->code	=  adv7180_colour_fmts[0].code;
+	mf->colorspace	= adv7180_colour_fmts[0].colorspace;
+//	mf->pixelformat = V4L2_PIX_FMT_UYVY;
+	mf->field	= V4L2_FIELD_NONE;
+	DBG("%s width %d height %d code 0x%x colorspace 0x%x",
+		__FUNCTION__, mf->width, mf->height, mf->code, mf->colorspace);
+	return 0;
+}
+
+static int adv7180_try_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
+{	
+	int i;
+	
+	DBG("%s width %d height %d code 0x%x colorspace 0x%x",
+		__FUNCTION__, mf->width, mf->height, mf->code, mf->colorspace);
+	//If input picture size is larger than supported picture size, just query max supported picture size.
+	i = 2;
+	if(mf->width > adv7180_pic_sizes[i].width || mf->height > adv7180_pic_sizes[i].height) {
+		mf->width = adv7180_pic_sizes[i].width;
+		mf->height = adv7180_pic_sizes[i].height;
+		return 0;
+	}
+	else
+		return 0;
+//	for(i = 0; i < ARRAY_SIZE(adv7180_colour_fmts); i++)
+//	{
+//		if( mf->width == adv7180_colour_fmts[i].width && 
+//			mf->height == adv7180_colour_fmts[i].height &&
+//			mf->code == adv7180_colour_fmts[i].code )
+//			return 0;
+//	}
+	
+	return -EINVAL;
+}
+
+static int adv7180_enum_mbus_fmt(struct v4l2_subdev *sd, unsigned int index,
+			    enum v4l2_mbus_pixelcode *code)
+{
+	DBG("%s index %d", __FUNCTION__, index);
+	
+	if (index >= ARRAY_SIZE(adv7180_colour_fmts))
+		return -EINVAL;
+
+	*code = adv7180_colour_fmts[index].code;
+	return 0;
+}
+
+static int adv7180_enum_mbus_pixelfmt(struct v4l2_subdev *sd, unsigned int index,
+			    int *code)
+{
+	DBG("%s index %d", __FUNCTION__, index);
+	
+	if(index > 0)
+		return -EINVAL;
+	
+	*code = V4L2_PIX_FMT_NV16;
+	return 0;
+}
+
+static int adv7180_set_bus_param(struct soc_camera_device *icd, unsigned long flags)
+{
+    return 0;
+}
+
+#define SENSOR_BUS_PARAM  (SOCAM_MASTER | SOCAM_PCLK_SAMPLE_RISING|\
+                          SOCAM_HSYNC_ACTIVE_LOW | SOCAM_VSYNC_ACTIVE_LOW |\
+                          SOCAM_DATA_ACTIVE_HIGH | SOCAM_DATAWIDTH_8  |SOCAM_MCLK_24MHZ)
+                          
+static unsigned long adv7180_query_bus_param(struct soc_camera_device *icd)
+{
+	struct soc_camera_link *icl = to_soc_camera_link(icd);
+	unsigned long flags = SENSOR_BUS_PARAM;
+	
+	return soc_camera_apply_sensor_flags(icl, flags);
+}
+
+static int adv7180_suspend(struct soc_camera_device *icd, pm_message_t pm_msg)
+{
+	DBG("%s", __FUNCTION__);
+	if (pm_msg.event == PM_EVENT_SUSPEND) {
+		adv7180_pwr_ctl(icd, 0);
+	}
+	return 0;
+}
+
+static int adv7180_resume(struct soc_camera_device *icd)
+{
+	DBG("%s", __FUNCTION__);
+	adv7180_pwr_ctl(icd, 1);
+	return 0;
+}
+
+static struct soc_camera_ops adv7180_sensor_ops =
+{
+	.suspend            = adv7180_suspend,
+	.resume 			= adv7180_resume,
+	.set_bus_param		= adv7180_set_bus_param,
+	.query_bus_param	= adv7180_query_bus_param,
+};
+
 static const struct v4l2_subdev_video_ops adv7180_video_ops = {
 	.querystd = adv7180_querystd,
 	.g_input_status = adv7180_g_input_status,
+	.s_mbus_fmt = adv7180_set_mbus_fmt,
+	.g_mbus_fmt = adv7180_get_mbus_fmt,
+	.try_mbus_fmt = adv7180_try_mbus_fmt,
+	.enum_mbus_fmt = adv7180_enum_mbus_fmt,
+//	.enum_mbus_pixelfmt = adv7180_enum_mbus_pixelfmt,
 };
 
 static const struct v4l2_subdev_core_ops adv7180_core_ops = {
+	.init = adv7180_v412_init,
+	.ioctl = adv7180_ioctl,
 	.g_chip_ident = adv7180_g_chip_ident,
 	.s_std = adv7180_s_std,
 };
@@ -265,10 +592,10 @@ static const struct v4l2_subdev_ops adv7180_ops = {
 	.video = &adv7180_video_ops,
 };
 
-static void adv7180_work(struct work_struct *work)
+static void adv7180_cvbs_work(struct work_struct *cvbs_work)
 {
-	struct adv7180_state *state = container_of(work, struct adv7180_state,
-		work);
+	struct adv7180_state *state = container_of(cvbs_work, struct adv7180_state,
+		cvbs_work);
 	struct i2c_client *client = v4l2_get_subdevdata(&state->sd);
 	u8 isr3;
 
@@ -284,119 +611,233 @@ static void adv7180_work(struct work_struct *work)
 		__adv7180_status(client, NULL, &state->curr_norm);
 	mutex_unlock(&state->mutex);
 
-	enable_irq(state->irq);
+	enable_irq(state->cvbs_irq);
 }
 
-static irqreturn_t adv7180_irq(int irq, void *devid)
+static void adv7180_ycrcb_work(struct work_struct *ycrcb_work)
+{
+	struct adv7180_state *state = container_of(ycrcb_work, struct adv7180_state,
+		ycrcb_work);
+	struct i2c_client *client = v4l2_get_subdevdata(&state->sd);
+	u8 isr3;
+
+	mutex_lock(&state->mutex);
+	i2c_smbus_write_byte_data(client, ADV7180_ADI_CTRL_REG,
+		ADV7180_ADI_CTRL_IRQ_SPACE);
+	isr3 = i2c_smbus_read_byte_data(client, ADV7180_ISR3_ADI);
+	/* clear */
+	i2c_smbus_write_byte_data(client, ADV7180_ICR3_ADI, isr3);
+	i2c_smbus_write_byte_data(client, ADV7180_ADI_CTRL_REG, 0);
+
+	if (isr3 & ADV7180_IRQ3_AD_CHANGE && state->autodetect)
+		__adv7180_status(client, NULL, &state->curr_norm);
+	mutex_unlock(&state->mutex);
+
+	enable_irq(state->ycrcb_irq);
+}
+
+static irqreturn_t adv7180_cvbs_irq(int irq, void *devid)
 {
 	struct adv7180_state *state = devid;
 
-	schedule_work(&state->work);
+	schedule_work(&state->cvbs_work);
 
-	disable_irq_nosync(state->irq);
+	disable_irq_nosync(state->cvbs_irq);
 
 	return IRQ_HANDLED;
 }
+
+
+static irqreturn_t adv7180_ycrcb_irq(int irq, void *devid)
+{
+	struct adv7180_state *state = devid;
+
+	schedule_work(&state->ycrcb_work);
+
+	disable_irq_nosync(state->ycrcb_irq);
+
+	return IRQ_HANDLED;
+}
+
+static ssize_t store_dbg(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    int reg, val;
+    struct i2c_client *client = to_i2c_client(dev);
+
+    sscanf(buf, "%x %x", &reg, &val);
+    i2c_smbus_write_byte_data(client, reg, val);
+    printk("write 0x%02x = 0x%02x, ret = 0x%02x\n", reg, val, i2c_smbus_read_byte_data(client, reg));
+
+    return count;
+}
+
+static struct device_attribute adv7180_dev_attr = {
+    .attr = {
+         .name = "reg",
+         .mode = S_IRUSR | S_IWUSR,
+         },
+    .store = store_dbg,
+};
 
 /*
  * Generic i2c probe
  * concerning the addresses: i2c wants 7 bit (without the r/w bit), so '>>1'
  */
 
-static __devinit int adv7180_probe(struct i2c_client *client,
+static int adv7180_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
 	struct adv7180_state *state;
 	struct v4l2_subdev *sd;
+	struct soc_camera_device *icd = client->dev.platform_data;
+	struct i2c_adapter *adapter = to_i2c_adapter(client->dev.parent);
 	int ret;
-
+	
+	printk("%s %d\n", __func__, __LINE__);
 	/* Check if the adapter supports the needed features */
-	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
+	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EIO;
-
+	
+	printk("%s %d\n", __func__, __LINE__);
 	v4l_info(client, "chip found @ 0x%02x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
+	printk("%s %d\n", __func__, __LINE__);
 	state = kzalloc(sizeof(struct adv7180_state), GFP_KERNEL);
 	if (state == NULL) {
 		ret = -ENOMEM;
 		goto err;
 	}
+	printk("%s %d\n", __func__, __LINE__);
 
-	state->irq = client->irq;
-	INIT_WORK(&state->work, adv7180_work);
+	rk30_mux_api_set(GPIO0B7_I2S8CHSDO3_NAME, GPIO0B_GPIO0B7);
+	ret = gpio_request(ADV7180_CVBS_IN_DET, "ADV_CVBS_INT");
+	if (ret != 0)
+	{
+		gpio_free(ADV7180_CVBS_IN_DET);
+		printk(KERN_ERR "request ADV7180_CVBS_IN_DET pin fail!\n");
+		return -1;
+	}
+	gpio_direction_input(ADV7180_CVBS_IN_DET);
+
+	ret = gpio_request(ADV7180_YCRCB_IN_DET, "ADV_YCRCB_INT");
+	if (ret != 0)
+	{
+		gpio_free(ADV7180_YCRCB_IN_DET);
+		printk(KERN_ERR "request ADV7180_YCRCB_IN_DET  pin fail!\n");
+		return -1;
+	}
+	gpio_direction_input(ADV7180_YCRCB_IN_DET);
+	
+	state->cvbs_irq = gpio_to_irq(ADV7180_CVBS_IN_DET);
+	state->ycrcb_irq = gpio_to_irq(ADV7180_YCRCB_IN_DET);
+	
+	INIT_WORK(&state->cvbs_work, adv7180_cvbs_work);
+	INIT_WORK(&state->ycrcb_work, adv7180_ycrcb_work);
 	mutex_init(&state->mutex);
 	state->autodetect = true;
 	sd = &state->sd;
 	v4l2_i2c_subdev_init(sd, client, &adv7180_ops);
 
-	/* Initialize adv7180 */
-	/* Enable autodetection */
-	ret = i2c_smbus_write_byte_data(client, ADV7180_INPUT_CONTROL_REG,
-		ADV7180_INPUT_CONTROL_AD_PAL_BG_NTSC_J_SECAM);
-	if (ret < 0)
+	state->icd = icd;
+	icd->ops = &adv7180_sensor_ops;
+	icd->user_width = adv7180_pic_sizes[0].width;
+	icd->user_height = adv7180_pic_sizes[0].height;
+	icd->colorspace = adv7180_colour_fmts[0].colorspace;
+	
+	adv7180_pwr_ctl(icd, 1);
+	ret = 0;
+
+	printk("%s %d\n", __func__, __LINE__);
+
+	ret = i2c_smbus_read_byte_data(client, ADV7180_IDENT_REG);
+	/*
+	if (ret != ADV7180_ID_7180)
 		goto err_unreg_subdev;
+		*/
 
-	ret = i2c_smbus_write_byte_data(client, ADV7180_AUTODETECT_ENABLE_REG,
-		ADV7180_AUTODETECT_DEFAULT);
-	if (ret < 0)
-		goto err_unreg_subdev;
+	printk("%s %d\n", __func__, __LINE__);
 
-	/* ITU-R BT.656-4 compatible */
-	ret = i2c_smbus_write_byte_data(client,
-		ADV7180_EXTENDED_OUTPUT_CONTROL_REG,
-		ADV7180_EXTENDED_OUTPUT_CONTROL_NTSCDIS);
-	if (ret < 0)
-		goto err_unreg_subdev;
+    ret = i2c_smbus_write_byte_data(client, 0x1d, 0x00); /* 27M/28M crystal */
 
-	/* read current norm */
-	__adv7180_status(client, NULL, &state->curr_norm);
+	int i;
+	if(gpio_get_value(ADV7180_YCRCB_IN_DET)==GPIO_LOW){
+		printk("adv7180 ycrcb init\n");
+		for(i=0;i<15;i++)
+			i2c_smbus_write_byte_data(client, init_ycrcb[i].reg, init_ycrcb[i].val);
+		
+	}else{
+		printk("adv7180 cvbs init\n");
+		for(i=0;i<15;i++)
+			i2c_smbus_write_byte_data(client, init_cvbs[i].reg, init_cvbs[i].val);
+	}
+	
 
+#if 0	
 	/* register for interrupts */
 	if (state->irq > 0) {
 		ret = request_irq(state->irq, adv7180_irq, 0, DRIVER_NAME,
 			state);
 		if (ret)
 			goto err_unreg_subdev;
+	printk("%s %d\n", __func__, __LINE__);
 
 		ret = i2c_smbus_write_byte_data(client, ADV7180_ADI_CTRL_REG,
 			ADV7180_ADI_CTRL_IRQ_SPACE);
 		if (ret < 0)
 			goto err_unreg_subdev;
+	printk("%s %d\n", __func__, __LINE__);
 
 		/* config the Interrupt pin to be active low */
 		ret = i2c_smbus_write_byte_data(client, ADV7180_ICONF1_ADI,
 			ADV7180_ICONF1_ACTIVE_LOW | ADV7180_ICONF1_PSYNC_ONLY);
 		if (ret < 0)
 			goto err_unreg_subdev;
+	printk("%s %d\n", __func__, __LINE__);
 
 		ret = i2c_smbus_write_byte_data(client, ADV7180_IMR1_ADI, 0);
 		if (ret < 0)
 			goto err_unreg_subdev;
+	printk("%s %d\n", __func__, __LINE__);
 
 		ret = i2c_smbus_write_byte_data(client, ADV7180_IMR2_ADI, 0);
 		if (ret < 0)
 			goto err_unreg_subdev;
+	printk("%s %d\n", __func__, __LINE__);
 
 		/* enable AD change interrupts interrupts */
 		ret = i2c_smbus_write_byte_data(client, ADV7180_IMR3_ADI,
 			ADV7180_IRQ3_AD_CHANGE);
 		if (ret < 0)
 			goto err_unreg_subdev;
+	printk("%s %d\n", __func__, __LINE__);
 
 		ret = i2c_smbus_write_byte_data(client, ADV7180_IMR4_ADI, 0);
 		if (ret < 0)
 			goto err_unreg_subdev;
+	printk("%s %d\n", __func__, __LINE__);
 
 		ret = i2c_smbus_write_byte_data(client, ADV7180_ADI_CTRL_REG,
 			0);
 		if (ret < 0)
 			goto err_unreg_subdev;
+	printk("%s %d\n", __func__, __LINE__);
 	}
+#endif	
+	adv7180_pwr_ctl(icd, 0);
 
+    ret = device_create_file(&client->dev, &adv7180_dev_attr);
+    if (ret) {
+        printk("create device file failed!\n");
+    }
+	
+	v4l_info(client, "chip probe success @ 0x%02x (%s)\n",
+			client->addr << 1, client->adapter->name);
+	
 	return 0;
 
 err_unreg_subdev:
+	adv7180_pwr_ctl(icd, 0);
 	mutex_destroy(&state->mutex);
 	v4l2_device_unregister_subdev(sd);
 	kfree(state);
@@ -405,20 +846,32 @@ err:
 	return ret;
 }
 
-static __devexit int adv7180_remove(struct i2c_client *client)
+static int adv7180_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct adv7180_state *state = to_state(sd);
 
-	if (state->irq > 0) {
-		free_irq(client->irq, state);
-		if (cancel_work_sync(&state->work)) {
+	if (state->cvbs_irq > 0) {
+		free_irq(state->cvbs_irq,state);
+		if (cancel_work_sync(&state->cvbs_work)) {
 			/*
 			 * Work was pending, therefore we need to enable
 			 * IRQ here to balance the disable_irq() done in the
 			 * interrupt handler.
 			 */
-			enable_irq(state->irq);
+			enable_irq(state->cvbs_irq);
+		}
+	}
+
+	if (state->ycrcb_irq > 0) {
+		free_irq(state->ycrcb_irq,state);
+		if (cancel_work_sync(&state->ycrcb_work)) {
+			/*
+			 * Work was pending, therefore we need to enable
+			 * IRQ here to balance the disable_irq() done in the
+			 * interrupt handler.
+			 */
+			enable_irq(state->ycrcb_irq);
 		}
 	}
 
@@ -437,7 +890,7 @@ MODULE_DEVICE_TABLE(i2c, adv7180_id);
 
 static struct i2c_driver adv7180_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
+//		.owner	= THIS_MODULE,
 		.name	= DRIVER_NAME,
 	},
 	.probe		= adv7180_probe,
@@ -447,6 +900,7 @@ static struct i2c_driver adv7180_driver = {
 
 static __init int adv7180_init(void)
 {
+    printk("\n%s..%s.. \n",__FUNCTION__, DRIVER_NAME);
 	return i2c_add_driver(&adv7180_driver);
 }
 
@@ -461,4 +915,3 @@ module_exit(adv7180_exit);
 MODULE_DESCRIPTION("Analog Devices ADV7180 video decoder driver");
 MODULE_AUTHOR("Mocean Laboratories");
 MODULE_LICENSE("GPL v2");
-

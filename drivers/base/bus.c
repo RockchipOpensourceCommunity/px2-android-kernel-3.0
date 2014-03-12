@@ -18,9 +18,10 @@
 #include <linux/string.h>
 #include "base.h"
 #include "power/power.h"
+#include "linux/usb.h"
+#include "devices_filter.h"
 
 #define to_bus_attr(_attr) container_of(_attr, struct bus_attribute, attr)
-#define to_bus(obj) container_of(obj, struct bus_type_private, subsys.kobj)
 
 /*
  * sysfs bindings for drivers
@@ -96,11 +97,11 @@ static ssize_t bus_attr_show(struct kobject *kobj, struct attribute *attr,
 			     char *buf)
 {
 	struct bus_attribute *bus_attr = to_bus_attr(attr);
-	struct bus_type_private *bus_priv = to_bus(kobj);
+	struct subsys_private *subsys_priv = to_subsys_private(kobj);
 	ssize_t ret = 0;
 
 	if (bus_attr->show)
-		ret = bus_attr->show(bus_priv->bus, buf);
+		ret = bus_attr->show(subsys_priv->bus, buf);
 	return ret;
 }
 
@@ -108,11 +109,11 @@ static ssize_t bus_attr_store(struct kobject *kobj, struct attribute *attr,
 			      const char *buf, size_t count)
 {
 	struct bus_attribute *bus_attr = to_bus_attr(attr);
-	struct bus_type_private *bus_priv = to_bus(kobj);
+	struct subsys_private *subsys_priv = to_subsys_private(kobj);
 	ssize_t ret = 0;
 
 	if (bus_attr->store)
-		ret = bus_attr->store(bus_priv->bus, buf, count);
+		ret = bus_attr->store(subsys_priv->bus, buf, count);
 	return ret;
 }
 
@@ -405,7 +406,20 @@ int bus_for_each_drv(struct bus_type *bus, struct device_driver *start,
 	klist_iter_init_node(&bus->p->klist_drivers, &i,
 			     start ? &start->p->knode_bus : NULL);
 	while ((drv = next_driver(&i)) && !error)
+	{
+		if( !strcmp(drv->name, "usb-storage") && data )
+		{
+			struct usb_device *udev = interface_to_usbdev( to_usb_interface( (struct device *)data) );
+			usb_parameter usbp = {udev->descriptor.idVendor, udev->descriptor.idProduct, 
+        	                        udev->manufacturer, udev->product, NULL};
+			if( is_skip_device(&usbp) )
+			{
+				printk("Skip device\n");
+				continue;
+			}
+		}
 		error = fn(drv, data);
+        }
 	klist_iter_exit(&i);
 	return error;
 }
@@ -440,22 +454,6 @@ static void device_remove_attrs(struct bus_type *bus, struct device *dev)
 	}
 }
 
-#ifdef CONFIG_SYSFS_DEPRECATED
-static int make_deprecated_bus_links(struct device *dev)
-{
-	return sysfs_create_link(&dev->kobj,
-				 &dev->bus->p->subsys.kobj, "bus");
-}
-
-static void remove_deprecated_bus_links(struct device *dev)
-{
-	sysfs_remove_link(&dev->kobj, "bus");
-}
-#else
-static inline int make_deprecated_bus_links(struct device *dev) { return 0; }
-static inline void remove_deprecated_bus_links(struct device *dev) { }
-#endif
-
 /**
  * bus_add_device - add device to bus
  * @dev: device being added
@@ -482,15 +480,10 @@ int bus_add_device(struct device *dev)
 				&dev->bus->p->subsys.kobj, "subsystem");
 		if (error)
 			goto out_subsys;
-		error = make_deprecated_bus_links(dev);
-		if (error)
-			goto out_deprecated;
 		klist_add_tail(&dev->p->knode_bus, &bus->p->klist_devices);
 	}
 	return 0;
 
-out_deprecated:
-	sysfs_remove_link(&dev->kobj, "subsystem");
 out_subsys:
 	sysfs_remove_link(&bus->p->devices_kset->kobj, dev_name(dev));
 out_id:
@@ -530,7 +523,6 @@ void bus_remove_device(struct device *dev)
 {
 	if (dev->bus) {
 		sysfs_remove_link(&dev->kobj, "subsystem");
-		remove_deprecated_bus_links(dev);
 		sysfs_remove_link(&dev->bus->p->devices_kset->kobj,
 				  dev_name(dev));
 		device_remove_attrs(dev->bus, dev);
@@ -674,7 +666,10 @@ int bus_add_driver(struct device_driver *drv)
 	if (drv->bus->p->drivers_autoprobe) {
 		error = driver_attach(drv);
 		if (error)
+		{
+			printk(KERN_ERR "driver_attach failed\n");
 			goto out_unregister;
+		}
 	}
 	klist_add_tail(&priv->knode_bus, &bus->p->klist_drivers);
 	module_add_driver(drv->owner, drv);
@@ -880,9 +875,9 @@ static BUS_ATTR(uevent, S_IWUSR, NULL, bus_uevent_store);
 int bus_register(struct bus_type *bus)
 {
 	int retval;
-	struct bus_type_private *priv;
+	struct subsys_private *priv;
 
-	priv = kzalloc(sizeof(struct bus_type_private), GFP_KERNEL);
+	priv = kzalloc(sizeof(struct subsys_private), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
@@ -945,8 +940,8 @@ bus_devices_fail:
 	bus_remove_file(bus, &bus_attr_uevent);
 bus_uevent_fail:
 	kset_unregister(&bus->p->subsys);
-	kfree(bus->p);
 out:
+	kfree(bus->p);
 	bus->p = NULL;
 	return retval;
 }
@@ -998,7 +993,7 @@ struct klist *bus_get_device_klist(struct bus_type *bus)
 EXPORT_SYMBOL_GPL(bus_get_device_klist);
 
 /*
- * Yes, this forcably breaks the klist abstraction temporarily.  It
+ * Yes, this forcibly breaks the klist abstraction temporarily.  It
  * just wants to sort the klist, not change reference counts and
  * take/drop locks rapidly in the process.  It does all this while
  * holding the lock for the list, so objects can't otherwise be

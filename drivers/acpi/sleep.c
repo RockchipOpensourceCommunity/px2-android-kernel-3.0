@@ -16,6 +16,7 @@
 #include <linux/device.h>
 #include <linux/suspend.h>
 #include <linux/reboot.h>
+#include <linux/acpi.h>
 
 #include <asm/io.h>
 
@@ -25,7 +26,7 @@
 #include "internal.h"
 #include "sleep.h"
 
-u8 sleep_states[ACPI_S_STATE_COUNT];
+static u8 sleep_states[ACPI_S_STATE_COUNT];
 
 static void acpi_sleep_tts_switch(u32 acpi_state)
 {
@@ -70,16 +71,30 @@ static int acpi_sleep_prepare(u32 acpi_state)
 
 	}
 	ACPI_FLUSH_CPU_CACHE();
-	acpi_enable_wakeup_device_prep(acpi_state);
 #endif
 	printk(KERN_INFO PREFIX "Preparing to enter system sleep state S%d\n",
 		acpi_state);
+	acpi_enable_wakeup_devices(acpi_state);
 	acpi_enter_sleep_state_prep(acpi_state);
 	return 0;
 }
 
 #ifdef CONFIG_ACPI_SLEEP
 static u32 acpi_target_sleep_state = ACPI_STATE_S0;
+
+/*
+ * The ACPI specification wants us to save NVS memory regions during hibernation
+ * and to restore them during the subsequent resume.  Windows does that also for
+ * suspend to RAM.  However, it is known that this mechanism does not work on
+ * all machines, so we allow the user to disable it with the help of the
+ * 'acpi_sleep=nonvs' kernel command line option.
+ */
+static bool nvs_nosave;
+
+void __init acpi_nvs_nosave(void)
+{
+	nvs_nosave = true;
+}
 
 /*
  * ACPI 1.0 wants us to execute _PTS before suspending devices, so we allow the
@@ -105,6 +120,15 @@ static int acpi_pm_freeze(void)
 }
 
 /**
+ * acpi_pre_suspend - Enable wakeup devices, "freeze" EC and save NVS.
+ */
+static int acpi_pm_pre_suspend(void)
+{
+	acpi_pm_freeze();
+	return suspend_nvs_save();
+}
+
+/**
  *	__acpi_pm_prepare - Prepare the platform to enter the target state.
  *
  *	If necessary, set the firmware waking vector and do arch-specific
@@ -113,9 +137,9 @@ static int acpi_pm_freeze(void)
 static int __acpi_pm_prepare(void)
 {
 	int error = acpi_sleep_prepare(acpi_target_sleep_state);
-
 	if (error)
 		acpi_target_sleep_state = ACPI_STATE_S0;
+
 	return error;
 }
 
@@ -126,9 +150,8 @@ static int __acpi_pm_prepare(void)
 static int acpi_pm_prepare(void)
 {
 	int error = __acpi_pm_prepare();
-
 	if (!error)
-		acpi_pm_freeze();
+		error = acpi_pm_pre_suspend();
 
 	return error;
 }
@@ -143,12 +166,15 @@ static void acpi_pm_finish(void)
 {
 	u32 acpi_state = acpi_target_sleep_state;
 
+	acpi_ec_unblock_transactions();
+	suspend_nvs_free();
+
 	if (acpi_state == ACPI_STATE_S0)
 		return;
 
 	printk(KERN_INFO PREFIX "Waking up from system sleep state S%d\n",
 		acpi_state);
-	acpi_disable_wakeup_device(acpi_state);
+	acpi_disable_wakeup_devices(acpi_state);
 	acpi_leave_sleep_state(acpi_state);
 
 	/* reset firmware waking vector */
@@ -174,8 +200,6 @@ static void acpi_pm_end(void)
 #endif /* CONFIG_ACPI_SLEEP */
 
 #ifdef CONFIG_SUSPEND
-extern void do_suspend_lowlevel(void);
-
 static u32 acpi_suspend_states[] = {
 	[PM_SUSPEND_ON] = ACPI_STATE_S0,
 	[PM_SUSPEND_STANDBY] = ACPI_STATE_S1,
@@ -191,6 +215,10 @@ static int acpi_suspend_begin(suspend_state_t pm_state)
 {
 	u32 acpi_state = acpi_suspend_states[pm_state];
 	int error = 0;
+
+	error = nvs_nosave ? 0 : suspend_nvs_alloc();
+	if (error)
+		return error;
 
 	if (sleep_states[acpi_state]) {
 		acpi_target_sleep_state = acpi_state;
@@ -214,21 +242,11 @@ static int acpi_suspend_begin(suspend_state_t pm_state)
 static int acpi_suspend_enter(suspend_state_t pm_state)
 {
 	acpi_status status = AE_OK;
-	unsigned long flags = 0;
 	u32 acpi_state = acpi_target_sleep_state;
+	int error;
 
 	ACPI_FLUSH_CPU_CACHE();
 
-	/* Do arch specific saving of state. */
-	if (acpi_state == ACPI_STATE_S3) {
-		int error = acpi_save_state_mem();
-
-		if (error)
-			return error;
-	}
-
-	local_irq_save(flags);
-	acpi_enable_wakeup_device(acpi_state);
 	switch (acpi_state) {
 	case ACPI_STATE_S1:
 		barrier();
@@ -236,7 +254,10 @@ static int acpi_suspend_enter(suspend_state_t pm_state)
 		break;
 
 	case ACPI_STATE_S3:
-		do_suspend_lowlevel();
+		error = acpi_suspend_lowlevel();
+		if (error)
+			return error;
+		pr_info(PREFIX "Low-level resume complete\n");
 		break;
 	}
 
@@ -262,20 +283,9 @@ static int acpi_suspend_enter(suspend_state_t pm_state)
 	/* Allow EC transactions to happen. */
 	acpi_ec_unblock_transactions_early();
 
-	local_irq_restore(flags);
-	printk(KERN_DEBUG "Back to C!\n");
-
-	/* restore processor state */
-	if (acpi_state == ACPI_STATE_S3)
-		acpi_restore_state_mem();
+	suspend_nvs_restore();
 
 	return ACPI_SUCCESS(status) ? 0 : -EFAULT;
-}
-
-static void acpi_suspend_finish(void)
-{
-	acpi_ec_unblock_transactions();
-	acpi_pm_finish();
 }
 
 static int acpi_suspend_state_valid(suspend_state_t pm_state)
@@ -294,12 +304,12 @@ static int acpi_suspend_state_valid(suspend_state_t pm_state)
 	}
 }
 
-static struct platform_suspend_ops acpi_suspend_ops = {
+static const struct platform_suspend_ops acpi_suspend_ops = {
 	.valid = acpi_suspend_state_valid,
 	.begin = acpi_suspend_begin,
 	.prepare_late = acpi_pm_prepare,
 	.enter = acpi_suspend_enter,
-	.wake = acpi_suspend_finish,
+	.wake = acpi_pm_finish,
 	.end = acpi_pm_end,
 };
 
@@ -312,9 +322,9 @@ static struct platform_suspend_ops acpi_suspend_ops = {
 static int acpi_suspend_begin_old(suspend_state_t pm_state)
 {
 	int error = acpi_suspend_begin(pm_state);
-
 	if (!error)
 		error = __acpi_pm_prepare();
+
 	return error;
 }
 
@@ -322,12 +332,12 @@ static int acpi_suspend_begin_old(suspend_state_t pm_state)
  * The following callbacks are used if the pre-ACPI 2.0 suspend ordering has
  * been requested.
  */
-static struct platform_suspend_ops acpi_suspend_ops_old = {
+static const struct platform_suspend_ops acpi_suspend_ops_old = {
 	.valid = acpi_suspend_state_valid,
 	.begin = acpi_suspend_begin_old,
-	.prepare_late = acpi_pm_freeze,
+	.prepare_late = acpi_pm_pre_suspend,
 	.enter = acpi_suspend_enter,
-	.wake = acpi_suspend_finish,
+	.wake = acpi_pm_finish,
 	.end = acpi_pm_end,
 	.recover = acpi_pm_finish,
 };
@@ -335,6 +345,12 @@ static struct platform_suspend_ops acpi_suspend_ops_old = {
 static int __init init_old_suspend_ordering(const struct dmi_system_id *d)
 {
 	old_suspend_ordering = true;
+	return 0;
+}
+
+static int __init init_nvs_nosave(const struct dmi_system_id *d)
+{
+	acpi_nvs_nosave();
 	return 0;
 }
 
@@ -372,25 +388,75 @@ static struct dmi_system_id __initdata acpisleep_dmi_table[] = {
 		DMI_MATCH(DMI_BOARD_NAME, "CF51-2L"),
 		},
 	},
+	{
+	.callback = init_nvs_nosave,
+	.ident = "Sony Vaio VGN-SR11M",
+	.matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "Sony Corporation"),
+		DMI_MATCH(DMI_PRODUCT_NAME, "VGN-SR11M"),
+		},
+	},
+	{
+	.callback = init_nvs_nosave,
+	.ident = "Everex StepNote Series",
+	.matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "Everex Systems, Inc."),
+		DMI_MATCH(DMI_PRODUCT_NAME, "Everex StepNote Series"),
+		},
+	},
+	{
+	.callback = init_nvs_nosave,
+	.ident = "Sony Vaio VPCEB1Z1E",
+	.matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "Sony Corporation"),
+		DMI_MATCH(DMI_PRODUCT_NAME, "VPCEB1Z1E"),
+		},
+	},
+	{
+	.callback = init_nvs_nosave,
+	.ident = "Sony Vaio VGN-NW130D",
+	.matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "Sony Corporation"),
+		DMI_MATCH(DMI_PRODUCT_NAME, "VGN-NW130D"),
+		},
+	},
+	{
+	.callback = init_nvs_nosave,
+	.ident = "Sony Vaio VPCCW29FX",
+	.matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "Sony Corporation"),
+		DMI_MATCH(DMI_PRODUCT_NAME, "VPCCW29FX"),
+		},
+	},
+	{
+	.callback = init_nvs_nosave,
+	.ident = "Averatec AV1020-ED2",
+	.matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "AVERATEC"),
+		DMI_MATCH(DMI_PRODUCT_NAME, "1000 Series"),
+		},
+	},
+	{
+	.callback = init_nvs_nosave,
+	.ident = "Asus K54C",
+	.matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK Computer Inc."),
+		DMI_MATCH(DMI_PRODUCT_NAME, "K54C"),
+		},
+	},
+	{
+	.callback = init_nvs_nosave,
+	.ident = "Asus K54HR",
+	.matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK Computer Inc."),
+		DMI_MATCH(DMI_PRODUCT_NAME, "K54HR"),
+		},
+	},
 	{},
 };
 #endif /* CONFIG_SUSPEND */
 
 #ifdef CONFIG_HIBERNATION
-/*
- * The ACPI specification wants us to save NVS memory regions during hibernation
- * and to restore them during the subsequent resume.  However, it is not certain
- * if this mechanism is going to work on all machines, so we allow the user to
- * disable this mechanism using the 'acpi_sleep=s4_nonvs' kernel command line
- * option.
- */
-static bool s4_no_nvs;
-
-void __init acpi_s4_no_nvs(void)
-{
-	s4_no_nvs = true;
-}
-
 static unsigned long s4_hardware_signature;
 static struct acpi_table_facs *facs;
 static bool nosigcheck;
@@ -404,7 +470,7 @@ static int acpi_hibernation_begin(void)
 {
 	int error;
 
-	error = s4_no_nvs ? 0 : hibernate_nvs_alloc();
+	error = nvs_nosave ? 0 : suspend_nvs_alloc();
 	if (!error) {
 		acpi_target_sleep_state = ACPI_STATE_S4;
 		acpi_sleep_tts_switch(acpi_target_sleep_state);
@@ -413,39 +479,18 @@ static int acpi_hibernation_begin(void)
 	return error;
 }
 
-static int acpi_hibernation_pre_snapshot(void)
-{
-	int error = acpi_pm_prepare();
-
-	if (!error)
-		hibernate_nvs_save();
-
-	return error;
-}
-
 static int acpi_hibernation_enter(void)
 {
 	acpi_status status = AE_OK;
-	unsigned long flags = 0;
 
 	ACPI_FLUSH_CPU_CACHE();
 
-	local_irq_save(flags);
-	acpi_enable_wakeup_device(ACPI_STATE_S4);
 	/* This shouldn't return.  If it returns, we have a problem */
 	status = acpi_enter_sleep_state(ACPI_STATE_S4);
 	/* Reprogram control registers and execute _BFS */
 	acpi_leave_sleep_state_prep(ACPI_STATE_S4);
-	local_irq_restore(flags);
 
 	return ACPI_SUCCESS(status) ? 0 : -EFAULT;
-}
-
-static void acpi_hibernation_finish(void)
-{
-	hibernate_nvs_free();
-	acpi_ec_unblock_transactions();
-	acpi_pm_finish();
 }
 
 static void acpi_hibernation_leave(void)
@@ -464,7 +509,7 @@ static void acpi_hibernation_leave(void)
 		panic("ACPI S4 hardware signature mismatch");
 	}
 	/* Restore the NVS memory area */
-	hibernate_nvs_restore();
+	suspend_nvs_restore();
 	/* Allow EC transactions to happen. */
 	acpi_ec_unblock_transactions_early();
 }
@@ -475,11 +520,11 @@ static void acpi_pm_thaw(void)
 	acpi_enable_all_runtime_gpes();
 }
 
-static struct platform_hibernation_ops acpi_hibernation_ops = {
+static const struct platform_hibernation_ops acpi_hibernation_ops = {
 	.begin = acpi_hibernation_begin,
 	.end = acpi_pm_end,
-	.pre_snapshot = acpi_hibernation_pre_snapshot,
-	.finish = acpi_hibernation_finish,
+	.pre_snapshot = acpi_pm_prepare,
+	.finish = acpi_pm_finish,
 	.prepare = acpi_pm_prepare,
 	.enter = acpi_hibernation_enter,
 	.leave = acpi_hibernation_leave,
@@ -506,31 +551,24 @@ static int acpi_hibernation_begin_old(void)
 	error = acpi_sleep_prepare(ACPI_STATE_S4);
 
 	if (!error) {
-		if (!s4_no_nvs)
-			error = hibernate_nvs_alloc();
+		if (!nvs_nosave)
+			error = suspend_nvs_alloc();
 		if (!error)
 			acpi_target_sleep_state = ACPI_STATE_S4;
 	}
 	return error;
 }
 
-static int acpi_hibernation_pre_snapshot_old(void)
-{
-	acpi_pm_freeze();
-	hibernate_nvs_save();
-	return 0;
-}
-
 /*
  * The following callbacks are used if the pre-ACPI 2.0 suspend ordering has
  * been requested.
  */
-static struct platform_hibernation_ops acpi_hibernation_ops_old = {
+static const struct platform_hibernation_ops acpi_hibernation_ops_old = {
 	.begin = acpi_hibernation_begin_old,
 	.end = acpi_pm_end,
-	.pre_snapshot = acpi_hibernation_pre_snapshot_old,
-	.finish = acpi_hibernation_finish,
+	.pre_snapshot = acpi_pm_pre_suspend,
 	.prepare = acpi_pm_freeze,
+	.finish = acpi_pm_finish,
 	.enter = acpi_hibernation_enter,
 	.leave = acpi_hibernation_leave,
 	.pre_restore = acpi_pm_freeze,
@@ -554,7 +592,7 @@ int acpi_suspend(u32 acpi_state)
 	return -EINVAL;
 }
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 /**
  *	acpi_pm_device_sleep_state - return preferred power state of ACPI device
  *		in the system sleep state given by %acpi_target_sleep_state
@@ -616,7 +654,7 @@ int acpi_pm_device_sleep_state(struct device *dev, int *d_min_p)
 	 * can wake the system.  _S0W may be valid, too.
 	 */
 	if (acpi_target_sleep_state == ACPI_STATE_S0 ||
-	    (device_may_wakeup(dev) && adev->wakeup.state.enabled &&
+	    (device_may_wakeup(dev) &&
 	     adev->wakeup.sleep_state <= acpi_target_sleep_state)) {
 		acpi_status status;
 
@@ -624,7 +662,9 @@ int acpi_pm_device_sleep_state(struct device *dev, int *d_min_p)
 		status = acpi_evaluate_integer(handle, acpi_method, NULL,
 						&d_max);
 		if (ACPI_FAILURE(status)) {
-			d_max = d_min;
+			if (acpi_target_sleep_state != ACPI_STATE_S0 ||
+			    status != AE_NOT_FOUND)
+				d_max = d_min;
 		} else if (d_max < d_min) {
 			/* Warn the user of the broken DSDT */
 			printk(KERN_WARNING "ACPI: Wrong value from %s\n",
@@ -638,7 +678,9 @@ int acpi_pm_device_sleep_state(struct device *dev, int *d_min_p)
 		*d_min_p = d_min;
 	return d_max;
 }
+#endif /* CONFIG_PM */
 
+#ifdef CONFIG_PM_SLEEP
 /**
  *	acpi_pm_device_sleep_wake - enable or disable the system wake-up
  *                                  capability of given device
@@ -660,25 +702,16 @@ int acpi_pm_device_sleep_wake(struct device *dev, bool enable)
 		return -ENODEV;
 	}
 
-	if (enable) {
-		error = acpi_enable_wakeup_device_power(adev,
-						acpi_target_sleep_state);
-		if (!error)
-			acpi_enable_gpe(adev->wakeup.gpe_device,
-					adev->wakeup.gpe_number,
-					ACPI_GPE_TYPE_WAKE);
-	} else {
-		acpi_disable_gpe(adev->wakeup.gpe_device, adev->wakeup.gpe_number,
-				ACPI_GPE_TYPE_WAKE);
-		error = acpi_disable_wakeup_device_power(adev);
-	}
+	error = enable ?
+		acpi_enable_wakeup_device_power(adev, acpi_target_sleep_state) :
+		acpi_disable_wakeup_device_power(adev);
 	if (!error)
 		dev_info(dev, "wake-up capability %s by ACPI\n",
 				enable ? "enabled" : "disabled");
 
 	return error;
 }
-#endif
+#endif  /* CONFIG_PM_SLEEP */
 
 static void acpi_power_off_prepare(void)
 {
@@ -692,7 +725,6 @@ static void acpi_power_off(void)
 	/* acpi_sleep_prepare(ACPI_STATE_S5) should have already been called */
 	printk(KERN_DEBUG "%s called\n", __func__);
 	local_irq_disable();
-	acpi_enable_wakeup_device(ACPI_STATE_S5);
 	acpi_enter_sleep_state(ACPI_STATE_S5);
 }
 
@@ -704,7 +736,7 @@ static void acpi_power_off(void)
  * paths through the BIOS, so disable _GTS and _BFS by default,
  * but do speak up and offer the option to enable them.
  */
-void __init acpi_gts_bfs_check(void)
+static void __init acpi_gts_bfs_check(void)
 {
 	acpi_handle dummy;
 

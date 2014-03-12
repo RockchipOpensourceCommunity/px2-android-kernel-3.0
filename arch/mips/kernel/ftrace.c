@@ -2,7 +2,7 @@
  * Code for replacing ftrace calls with jumps.
  *
  * Copyright (C) 2007-2008 Steven Rostedt <srostedt@redhat.com>
- * Copyright (C) 2009 DSLab, Lanzhou University, China
+ * Copyright (C) 2009, 2010 DSLab, Lanzhou University, China
  * Author: Wu Zhangjin <wuzhangjin@gmail.com>
  *
  * Thanks goes to Steven Rostedt for writing the original x86 version.
@@ -12,18 +12,61 @@
 #include <linux/init.h>
 #include <linux/ftrace.h>
 
-#include <asm/cacheflush.h>
 #include <asm/asm.h>
 #include <asm/asm-offsets.h>
+#include <asm/cacheflush.h>
+#include <asm/uasm.h>
+
+#include <asm-generic/sections.h>
 
 #ifdef CONFIG_DYNAMIC_FTRACE
 
 #define JAL 0x0c000000		/* jump & link: ip --> ra, jump to target */
 #define ADDR_MASK 0x03ffffff	/*  op_code|addr : 31...26|25 ....0 */
-#define jump_insn_encode(op_code, addr) \
-	((unsigned int)((op_code) | (((addr) >> 2) & ADDR_MASK)))
+#define JUMP_RANGE_MASK ((1UL << 28) - 1)
 
-static unsigned int ftrace_nop = 0x00000000;
+#define INSN_NOP 0x00000000	/* nop */
+#define INSN_JAL(addr)	\
+	((unsigned int)(JAL | (((addr) >> 2) & ADDR_MASK)))
+
+static unsigned int insn_jal_ftrace_caller __read_mostly;
+static unsigned int insn_lui_v1_hi16_mcount __read_mostly;
+static unsigned int insn_j_ftrace_graph_caller __maybe_unused __read_mostly;
+
+static inline void ftrace_dyn_arch_init_insns(void)
+{
+	u32 *buf;
+	unsigned int v1;
+
+	/* lui v1, hi16_mcount */
+	v1 = 3;
+	buf = (u32 *)&insn_lui_v1_hi16_mcount;
+	UASM_i_LA_mostly(&buf, v1, MCOUNT_ADDR);
+
+	/* jal (ftrace_caller + 8), jump over the first two instruction */
+	buf = (u32 *)&insn_jal_ftrace_caller;
+	uasm_i_jal(&buf, (FTRACE_ADDR + 8) & JUMP_RANGE_MASK);
+
+#ifdef CONFIG_FUNCTION_GRAPH_TRACER
+	/* j ftrace_graph_caller */
+	buf = (u32 *)&insn_j_ftrace_graph_caller;
+	uasm_i_j(&buf, (unsigned long)ftrace_graph_caller & JUMP_RANGE_MASK);
+#endif
+}
+
+/*
+ * Check if the address is in kernel space
+ *
+ * Clone core_kernel_text() from kernel/extable.c, but doesn't call
+ * init_kernel_text() for Ftrace doesn't trace functions in init sections.
+ */
+static inline int in_kernel_space(unsigned long ip)
+{
+	if (ip >= (unsigned long)_stext &&
+	    ip <= (unsigned long)_etext)
+		return 1;
+	return 0;
+}
 
 static int ftrace_modify_code(unsigned long ip, unsigned int new_code)
 {
@@ -40,67 +83,64 @@ static int ftrace_modify_code(unsigned long ip, unsigned int new_code)
 	return 0;
 }
 
-static int lui_v1;
-static int jal_mcount;
+/*
+ * The details about the calling site of mcount on MIPS
+ *
+ * 1. For kernel:
+ *
+ * move at, ra
+ * jal _mcount		--> nop
+ *
+ * 2. For modules:
+ *
+ * 2.1 For KBUILD_MCOUNT_RA_ADDRESS and CONFIG_32BIT
+ *
+ * lui v1, hi_16bit_of_mcount        --> b 1f (0x10000005)
+ * addiu v1, v1, low_16bit_of_mcount
+ * move at, ra
+ * move $12, ra_address
+ * jalr v1
+ *  sub sp, sp, 8
+ *                                  1: offset = 5 instructions
+ * 2.2 For the Other situations
+ *
+ * lui v1, hi_16bit_of_mcount        --> b 1f (0x10000004)
+ * addiu v1, v1, low_16bit_of_mcount
+ * move at, ra
+ * jalr v1
+ *  nop | move $12, ra_address | sub sp, sp, 8
+ *                                  1: offset = 4 instructions
+ */
+
+#if defined(KBUILD_MCOUNT_RA_ADDRESS) && defined(CONFIG_32BIT)
+#define MCOUNT_OFFSET_INSNS 5
+#else
+#define MCOUNT_OFFSET_INSNS 4
+#endif
+#define INSN_B_1F (0x10000000 | MCOUNT_OFFSET_INSNS)
 
 int ftrace_make_nop(struct module *mod,
 		    struct dyn_ftrace *rec, unsigned long addr)
 {
 	unsigned int new;
-	int faulted;
 	unsigned long ip = rec->ip;
 
-	/* We have compiled module with -mlong-calls, but compiled the kernel
-	 * without it, we need to cope with them respectively. */
-	if (ip & 0x40000000) {
-		/* record it for ftrace_make_call */
-		if (lui_v1 == 0) {
-			/* lui_v1 = *(unsigned int *)ip; */
-			safe_load_code(lui_v1, ip, faulted);
+	/*
+	 * If ip is in kernel space, no long call, otherwise, long call is
+	 * needed.
+	 */
+	new = in_kernel_space(ip) ? INSN_NOP : INSN_B_1F;
 
-			if (unlikely(faulted))
-				return -EFAULT;
-		}
-
-		/* lui v1, hi_16bit_of_mcount        --> b 1f (0x10000004)
-		 * addiu v1, v1, low_16bit_of_mcount
-		 * move at, ra
-		 * jalr v1
-		 * nop
-		 * 				     1f: (ip + 12)
-		 */
-		new = 0x10000004;
-	} else {
-		/* record/calculate it for ftrace_make_call */
-		if (jal_mcount == 0) {
-			/* We can record it directly like this:
-			 *     jal_mcount = *(unsigned int *)ip;
-			 * Herein, jump over the first two nop instructions */
-			jal_mcount = jump_insn_encode(JAL, (MCOUNT_ADDR + 8));
-		}
-
-		/* move at, ra
-		 * jalr v1		--> nop
-		 */
-		new = ftrace_nop;
-	}
 	return ftrace_modify_code(ip, new);
 }
-
-static int modified;	/* initialized as 0 by default */
 
 int ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
 {
 	unsigned int new;
 	unsigned long ip = rec->ip;
 
-	/* We just need to remove the "b ftrace_stub" at the fist time! */
-	if (modified == 0) {
-		modified = 1;
-		ftrace_modify_code(addr, ftrace_nop);
-	}
-	/* ip, module: 0xc0000000, kernel: 0x80000000 */
-	new = (ip & 0x40000000) ? lui_v1 : jal_mcount;
+	new = in_kernel_space(ip) ? insn_jal_ftrace_caller :
+		insn_lui_v1_hi16_mcount;
 
 	return ftrace_modify_code(ip, new);
 }
@@ -111,117 +151,121 @@ int ftrace_update_ftrace_func(ftrace_func_t func)
 {
 	unsigned int new;
 
-	new = jump_insn_encode(JAL, (unsigned long)func);
+	new = INSN_JAL((unsigned long)func);
 
 	return ftrace_modify_code(FTRACE_CALL_IP, new);
 }
 
 int __init ftrace_dyn_arch_init(void *data)
 {
+	/* Encode the instructions when booting */
+	ftrace_dyn_arch_init_insns();
+
+	/* Remove "b ftrace_stub" to ensure ftrace_caller() is executed */
+	ftrace_modify_code(MCOUNT_ADDR, INSN_NOP);
+
 	/* The return code is retured via data */
 	*(unsigned long *)data = 0;
 
 	return 0;
 }
-#endif				/* CONFIG_DYNAMIC_FTRACE */
+#endif	/* CONFIG_DYNAMIC_FTRACE */
 
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
 
 #ifdef CONFIG_DYNAMIC_FTRACE
 
 extern void ftrace_graph_call(void);
-#define JMP	0x08000000	/* jump to target directly */
-#define CALL_FTRACE_GRAPH_CALLER \
-	jump_insn_encode(JMP, (unsigned long)(&ftrace_graph_caller))
 #define FTRACE_GRAPH_CALL_IP	((unsigned long)(&ftrace_graph_call))
 
 int ftrace_enable_ftrace_graph_caller(void)
 {
 	return ftrace_modify_code(FTRACE_GRAPH_CALL_IP,
-				  CALL_FTRACE_GRAPH_CALLER);
+			insn_j_ftrace_graph_caller);
 }
 
 int ftrace_disable_ftrace_graph_caller(void)
 {
-	return ftrace_modify_code(FTRACE_GRAPH_CALL_IP, ftrace_nop);
+	return ftrace_modify_code(FTRACE_GRAPH_CALL_IP, INSN_NOP);
 }
 
-#endif				/* !CONFIG_DYNAMIC_FTRACE */
+#endif	/* CONFIG_DYNAMIC_FTRACE */
 
 #ifndef KBUILD_MCOUNT_RA_ADDRESS
+
 #define S_RA_SP	(0xafbf << 16)	/* s{d,w} ra, offset(sp) */
 #define S_R_SP	(0xafb0 << 16)  /* s{d,w} R, offset(sp) */
 #define OFFSET_MASK	0xffff	/* stack offset range: 0 ~ PT_SIZE */
 
-unsigned long ftrace_get_parent_addr(unsigned long self_addr,
-				     unsigned long parent,
-				     unsigned long parent_addr,
-				     unsigned long fp)
+unsigned long ftrace_get_parent_ra_addr(unsigned long self_ra, unsigned long
+		old_parent_ra, unsigned long parent_ra_addr, unsigned long fp)
 {
-	unsigned long sp, ip, ra;
+	unsigned long sp, ip, tmp;
 	unsigned int code;
 	int faulted;
 
-	/* in module or kernel? */
-	if (self_addr & 0x40000000) {
-		/* module: move to the instruction "lui v1, HI_16BIT_OF_MCOUNT" */
-		ip = self_addr - 20;
-	} else {
-		/* kernel: move to the instruction "move ra, at" */
-		ip = self_addr - 12;
-	}
+	/*
+	 * For module, move the ip from the return address after the
+	 * instruction "lui v1, hi_16bit_of_mcount"(offset is 24), but for
+	 * kernel, move after the instruction "move ra, at"(offset is 16)
+	 */
+	ip = self_ra - (in_kernel_space(self_ra) ? 16 : 24);
 
-	/* search the text until finding the non-store instruction or "s{d,w}
-	 * ra, offset(sp)" instruction */
+	/*
+	 * search the text until finding the non-store instruction or "s{d,w}
+	 * ra, offset(sp)" instruction
+	 */
 	do {
-		ip -= 4;
-
 		/* get the code at "ip": code = *(unsigned int *)ip; */
 		safe_load_code(code, ip, faulted);
 
 		if (unlikely(faulted))
 			return 0;
-
-		/* If we hit the non-store instruction before finding where the
+		/*
+		 * If we hit the non-store instruction before finding where the
 		 * ra is stored, then this is a leaf function and it does not
-		 * store the ra on the stack. */
+		 * store the ra on the stack
+		 */
 		if ((code & S_R_SP) != S_R_SP)
-			return parent_addr;
+			return parent_ra_addr;
 
-	} while (((code & S_RA_SP) != S_RA_SP));
+		/* Move to the next instruction */
+		ip -= 4;
+	} while ((code & S_RA_SP) != S_RA_SP);
 
 	sp = fp + (code & OFFSET_MASK);
 
-	/* ra = *(unsigned long *)sp; */
-	safe_load_stack(ra, sp, faulted);
+	/* tmp = *(unsigned long *)sp; */
+	safe_load_stack(tmp, sp, faulted);
 	if (unlikely(faulted))
 		return 0;
 
-	if (ra == parent)
+	if (tmp == old_parent_ra)
 		return sp;
 	return 0;
 }
 
-#endif
+#endif	/* !KBUILD_MCOUNT_RA_ADDRESS */
 
 /*
  * Hook the return address and push it in the stack of return addrs
  * in current thread info.
  */
-void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr,
+void prepare_ftrace_return(unsigned long *parent_ra_addr, unsigned long self_ra,
 			   unsigned long fp)
 {
-	unsigned long old;
+	unsigned long old_parent_ra;
 	struct ftrace_graph_ent trace;
 	unsigned long return_hooker = (unsigned long)
 	    &return_to_handler;
-	int faulted;
+	int faulted, insns;
 
 	if (unlikely(atomic_read(&current->tracing_graph_pause)))
 		return;
 
-	/* "parent" is the stack address saved the return address of the caller
-	 * of _mcount.
+	/*
+	 * "parent_ra_addr" is the stack address saved the return address of
+	 * the caller of _mcount.
 	 *
 	 * if the gcc < 4.5, a leaf function does not save the return address
 	 * in the stack address, so, we "emulate" one in _mcount's stack space,
@@ -236,40 +280,48 @@ void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr,
 	 * do it in ftrace_graph_caller of mcount.S.
 	 */
 
-	/* old = *parent; */
-	safe_load_stack(old, parent, faulted);
+	/* old_parent_ra = *parent_ra_addr; */
+	safe_load_stack(old_parent_ra, parent_ra_addr, faulted);
 	if (unlikely(faulted))
 		goto out;
 #ifndef KBUILD_MCOUNT_RA_ADDRESS
-	parent = (unsigned long *)ftrace_get_parent_addr(self_addr, old,
-							 (unsigned long)parent,
-							 fp);
-	/* If fails when getting the stack address of the non-leaf function's
-	 * ra, stop function graph tracer and return */
-	if (parent == 0)
+	parent_ra_addr = (unsigned long *)ftrace_get_parent_ra_addr(self_ra,
+			old_parent_ra, (unsigned long)parent_ra_addr, fp);
+	/*
+	 * If fails when getting the stack address of the non-leaf function's
+	 * ra, stop function graph tracer and return
+	 */
+	if (parent_ra_addr == 0)
 		goto out;
 #endif
-	/* *parent = return_hooker; */
-	safe_store_stack(return_hooker, parent, faulted);
+	/* *parent_ra_addr = return_hooker; */
+	safe_store_stack(return_hooker, parent_ra_addr, faulted);
 	if (unlikely(faulted))
 		goto out;
 
-	if (ftrace_push_return_trace(old, self_addr, &trace.depth, fp) ==
-	    -EBUSY) {
-		*parent = old;
+	if (ftrace_push_return_trace(old_parent_ra, self_ra, &trace.depth, fp)
+	    == -EBUSY) {
+		*parent_ra_addr = old_parent_ra;
 		return;
 	}
 
-	trace.func = self_addr;
+	/*
+	 * Get the recorded ip of the current mcount calling site in the
+	 * __mcount_loc section, which will be used to filter the function
+	 * entries configured through the tracing/set_graph_function interface.
+	 */
+
+	insns = in_kernel_space(self_ra) ? 2 : MCOUNT_OFFSET_INSNS + 1;
+	trace.func = self_ra - (MCOUNT_INSN_SIZE * insns);
 
 	/* Only trace if the calling function expects to */
 	if (!ftrace_graph_entry(&trace)) {
 		current->curr_ret_stack--;
-		*parent = old;
+		*parent_ra_addr = old_parent_ra;
 	}
 	return;
 out:
 	ftrace_graph_stop();
 	WARN_ON(1);
 }
-#endif				/* CONFIG_FUNCTION_GRAPH_TRACER */
+#endif	/* CONFIG_FUNCTION_GRAPH_TRACER */

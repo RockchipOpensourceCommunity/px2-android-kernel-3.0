@@ -262,7 +262,8 @@ BYTE            pbyData[24];
     dwData1 <<= 16;
     dwData1 |= MAKEWORD(*(pbyAddr+4), *(pbyAddr+5));
 
-    DBG_PRT(MSG_LEVEL_DEBUG, KERN_INFO"1. wOffset: %d, Data: %lX, KeyCtl:%X\n", wOffset, dwData1, wKeyCtl);
+	DBG_PRT(MSG_LEVEL_DEBUG, KERN_INFO"1. wOffset: %d, Data: %X,"\
+		" KeyCtl:%X\n", wOffset, dwData1, wKeyCtl);
 
     //VNSvOutPortW(dwIoBase + MAC_REG_MISCFFNDEX, wOffset);
     //VNSvOutPortD(dwIoBase + MAC_REG_MISCFFDATA, dwData);
@@ -279,7 +280,8 @@ BYTE            pbyData[24];
     dwData2 <<= 8;
     dwData2 |= *(pbyAddr+0);
 
-    DBG_PRT(MSG_LEVEL_DEBUG, KERN_INFO"2. wOffset: %d, Data: %lX\n", wOffset, dwData2);
+	DBG_PRT(MSG_LEVEL_DEBUG, KERN_INFO"2. wOffset: %d, Data: %X\n",
+		wOffset, dwData2);
 
     //VNSvOutPortW(dwIoBase + MAC_REG_MISCFFNDEX, wOffset);
     //VNSvOutPortD(dwIoBase + MAC_REG_MISCFFDATA, dwData);
@@ -306,8 +308,8 @@ BYTE            pbyData[24];
     pbyData[5] = (BYTE)(dwData2>>8);
     pbyData[6] = (BYTE)(dwData2>>16);
     pbyData[7] = (BYTE)(dwData2>>24);
-    for(ii=8;ii<24;ii++)
-        pbyData[ii] = *pbyKey++;
+    for (ii = 8; ii < 24; ii++)
+	pbyData[ii] = *pbyKey++;
 
     CONTROLnsRequestOut(pDevice,
                         MESSAGE_TYPE_SETKEY,
@@ -471,10 +473,10 @@ BYTE            pbyData[2];
     pbyData[1] = (BYTE) (wInterval >> 8);
 
     CONTROLnsRequestOut(pDevice,
-                        MESSAGE_TYPE_WRITE,
-                        MAC_REG_BI,
-                        MESSAGE_REQUEST_MACREG,
-                        2,
-                        pbyData
-                        );
+			MESSAGE_TYPE_WRITE,
+			MAC_REG_BI,
+			MESSAGE_REQUEST_MACREG,
+			2,
+			pbyData
+			);
 }

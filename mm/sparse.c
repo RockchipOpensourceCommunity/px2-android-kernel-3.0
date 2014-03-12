@@ -353,29 +353,21 @@ static void __init sparse_early_usemaps_alloc_node(unsigned long**usemap_map,
 
 	usemap = sparse_early_usemaps_alloc_pgdat_section(NODE_DATA(nodeid),
 								 usemap_count);
-	if (usemap) {
-		for (pnum = pnum_begin; pnum < pnum_end; pnum++) {
-			if (!present_section_nr(pnum))
-				continue;
-			usemap_map[pnum] = usemap;
-			usemap += size;
+	if (!usemap) {
+		usemap = alloc_bootmem_node(NODE_DATA(nodeid), size * usemap_count);
+		if (!usemap) {
+			printk(KERN_WARNING "%s: allocation failed\n", __func__);
+			return;
 		}
-		return;
 	}
 
-	usemap = alloc_bootmem_node(NODE_DATA(nodeid), size * usemap_count);
-	if (usemap) {
-		for (pnum = pnum_begin; pnum < pnum_end; pnum++) {
-			if (!present_section_nr(pnum))
-				continue;
-			usemap_map[pnum] = usemap;
-			usemap += size;
-			check_usemap_section_nr(nodeid, usemap_map[pnum]);
-		}
-		return;
+	for (pnum = pnum_begin; pnum < pnum_end; pnum++) {
+		if (!present_section_nr(pnum))
+			continue;
+		usemap_map[pnum] = usemap;
+		usemap += size;
+		check_usemap_section_nr(nodeid, usemap_map[pnum]);
 	}
-
-	printk(KERN_WARNING "%s: allocation failed\n", __func__);
 }
 
 #ifndef CONFIG_SPARSEMEM_VMEMMAP
@@ -500,7 +492,7 @@ void __init sparse_init(void)
 	 * so alloc 2M (with 2M align) and 24 bytes in turn will
 	 * make next 2M slip to one more 2M later.
 	 * then in big system, the memory will have a lot of holes...
-	 * here try to allocate 2M pages continously.
+	 * here try to allocate 2M pages continuously.
 	 *
 	 * powerpc need to call sparse_init_one_section right after each
 	 * sparse_early_mem_map_alloc, so allocate usemap_map at first.
@@ -627,7 +619,7 @@ static void __kfree_section_memmap(struct page *memmap, unsigned long nr_pages)
 {
 	return; /* XXX: Not implemented yet */
 }
-static void free_map_bootmem(struct page *page, unsigned long nr_pages)
+static void free_map_bootmem(struct page *memmap, unsigned long nr_pages)
 {
 }
 #else
@@ -668,13 +660,14 @@ static void __kfree_section_memmap(struct page *memmap, unsigned long nr_pages)
 			   get_order(sizeof(struct page) * nr_pages));
 }
 
-static void free_map_bootmem(struct page *page, unsigned long nr_pages)
+static void free_map_bootmem(struct page *memmap, unsigned long nr_pages)
 {
 	unsigned long maps_section_nr, removing_section_nr, i;
-	int magic;
+	unsigned long magic;
+	struct page *page = virt_to_page(memmap);
 
 	for (i = 0; i < nr_pages; i++, page++) {
-		magic = atomic_read(&page->_mapcount);
+		magic = (unsigned long) page->lru.next;
 
 		BUG_ON(magic == NODE_INFO);
 
@@ -720,13 +713,10 @@ static void free_section_usemap(struct page *memmap, unsigned long *usemap)
 	 */
 
 	if (memmap) {
-		struct page *memmap_page;
-		memmap_page = virt_to_page(memmap);
-
 		nr_pages = PAGE_ALIGN(PAGES_PER_SECTION * sizeof(struct page))
 			>> PAGE_SHIFT;
 
-		free_map_bootmem(memmap_page, nr_pages);
+		free_map_bootmem(memmap, nr_pages);
 	}
 }
 

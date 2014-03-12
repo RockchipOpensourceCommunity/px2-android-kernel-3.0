@@ -152,12 +152,12 @@ static int  whiteheat_write(struct tty_struct *tty,
 			struct usb_serial_port *port,
 			const unsigned char *buf, int count);
 static int  whiteheat_write_room(struct tty_struct *tty);
-static int  whiteheat_ioctl(struct tty_struct *tty, struct file *file,
+static int  whiteheat_ioctl(struct tty_struct *tty,
 			unsigned int cmd, unsigned long arg);
 static void whiteheat_set_termios(struct tty_struct *tty,
 			struct usb_serial_port *port, struct ktermios *old);
-static int  whiteheat_tiocmget(struct tty_struct *tty, struct file *file);
-static int  whiteheat_tiocmset(struct tty_struct *tty, struct file *file,
+static int  whiteheat_tiocmget(struct tty_struct *tty);
+static int  whiteheat_tiocmset(struct tty_struct *tty,
 			unsigned int set, unsigned int clear);
 static void whiteheat_break_ctl(struct tty_struct *tty, int break_state);
 static int  whiteheat_chars_in_buffer(struct tty_struct *tty);
@@ -576,6 +576,7 @@ no_firmware:
 		"%s: please contact support@connecttech.com\n",
 		serial->type->description);
 	kfree(result);
+	kfree(command);
 	return -ENODEV;
 
 no_command_private:
@@ -655,8 +656,6 @@ static void whiteheat_release(struct usb_serial *serial)
 		}
 		kfree(info);
 	}
-
-	return;
 }
 
 static int whiteheat_open(struct tty_struct *tty, struct usb_serial_port *port)
@@ -835,7 +834,7 @@ static int whiteheat_write_room(struct tty_struct *tty)
 	return (room);
 }
 
-static int whiteheat_tiocmget(struct tty_struct *tty, struct file *file)
+static int whiteheat_tiocmget(struct tty_struct *tty)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	struct whiteheat_private *info = usb_get_serial_port_data(port);
@@ -852,7 +851,7 @@ static int whiteheat_tiocmget(struct tty_struct *tty, struct file *file)
 	return modem_signals;
 }
 
-static int whiteheat_tiocmset(struct tty_struct *tty, struct file *file,
+static int whiteheat_tiocmset(struct tty_struct *tty,
 			       unsigned int set, unsigned int clear)
 {
 	struct usb_serial_port *port = tty->driver_data;
@@ -876,7 +875,7 @@ static int whiteheat_tiocmset(struct tty_struct *tty, struct file *file,
 }
 
 
-static int whiteheat_ioctl(struct tty_struct *tty, struct file *file,
+static int whiteheat_ioctl(struct tty_struct *tty,
 					unsigned int cmd, unsigned long arg)
 {
 	struct usb_serial_port *port = tty->driver_data;
@@ -955,8 +954,6 @@ static void whiteheat_throttle(struct tty_struct *tty)
 	spin_lock_irq(&info->lock);
 	info->flags |= THROTTLED;
 	spin_unlock_irq(&info->lock);
-
-	return;
 }
 
 
@@ -975,8 +972,6 @@ static void whiteheat_unthrottle(struct tty_struct *tty)
 
 	if (actually_throttled)
 		rx_data_softint(&info->rx_work);
-
-	return;
 }
 
 

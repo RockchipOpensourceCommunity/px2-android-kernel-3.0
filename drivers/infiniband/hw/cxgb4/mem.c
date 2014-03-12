@@ -59,7 +59,7 @@ static int write_adapter_mem(struct c4iw_rdev *rdev, u32 addr, u32 len,
 		wr_len = roundup(sizeof *req + sizeof *sc +
 				 roundup(copy_len, T4_ULPTX_MIN_IO), 16);
 
-		skb = alloc_skb(wr_len, GFP_KERNEL | __GFP_NOFAIL);
+		skb = alloc_skb(wr_len, GFP_KERNEL);
 		if (!skb)
 			return -ENOMEM;
 		set_wr_txq(skb, CPL_PRIORITY_CONTROL, 0);
@@ -71,7 +71,7 @@ static int write_adapter_mem(struct c4iw_rdev *rdev, u32 addr, u32 len,
 		if (i == (num_wqe-1)) {
 			req->wr.wr_hi = cpu_to_be32(FW_WR_OP(FW_ULPTX_WR) |
 						    FW_WR_COMPL(1));
-			req->wr.wr_lo = (__force __be64)&wr_wait;
+			req->wr.wr_lo = (__force __be64)(unsigned long) &wr_wait;
 		} else
 			req->wr.wr_hi = cpu_to_be32(FW_WR_OP(FW_ULPTX_WR));
 		req->wr.wr_mid = cpu_to_be32(
@@ -103,14 +103,7 @@ static int write_adapter_mem(struct c4iw_rdev *rdev, u32 addr, u32 len,
 		len -= C4IW_MAX_INLINE_SIZE;
 	}
 
-	wait_event_timeout(wr_wait.wait, wr_wait.done, C4IW_WR_TO);
-	if (!wr_wait.done) {
-		printk(KERN_ERR MOD "Device %s not responding!\n",
-		       pci_name(rdev->lldi.pdev));
-		rdev->flags = T4_FATAL_ERROR;
-		ret = -EIO;
-	} else
-		ret = wr_wait.ret;
+	ret = c4iw_wait_for_reply(rdev, &wr_wait, 0, 0, __func__);
 	return ret;
 }
 
@@ -632,7 +625,7 @@ pbl_done:
 	mhp->attr.perms = c4iw_ib_to_tpt_access(acc);
 	mhp->attr.va_fbo = virt;
 	mhp->attr.page_size = shift - 12;
-	mhp->attr.len = (u32) length;
+	mhp->attr.len = length;
 
 	err = register_mem(rhp, php, mhp, shift);
 	if (err)
@@ -764,7 +757,7 @@ struct ib_fast_reg_page_list *c4iw_alloc_fastreg_pbl(struct ib_device *device,
 	if (!c4pl)
 		return ERR_PTR(-ENOMEM);
 
-	pci_unmap_addr_set(c4pl, mapping, dma_addr);
+	dma_unmap_addr_set(c4pl, mapping, dma_addr);
 	c4pl->dma_addr = dma_addr;
 	c4pl->dev = dev;
 	c4pl->size = size;
@@ -779,7 +772,7 @@ void c4iw_free_fastreg_pbl(struct ib_fast_reg_page_list *ibpl)
 	struct c4iw_fr_page_list *c4pl = to_c4iw_fr_page_list(ibpl);
 
 	dma_free_coherent(&c4pl->dev->rdev.lldi.pdev->dev, c4pl->size,
-			  c4pl, pci_unmap_addr(c4pl, mapping));
+			  c4pl, dma_unmap_addr(c4pl, mapping));
 }
 
 int c4iw_dereg_mr(struct ib_mr *ib_mr)

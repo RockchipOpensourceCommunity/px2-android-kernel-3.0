@@ -1,0 +1,48 @@
+config  HDMI_RKPX2
+        bool "RKPX2 HDMI support"
+        depends on LCDC_RKPX2
+        help
+           Support RKPX2 hdmi if you say y here
+
+if HDMI_RKPX2
+source "drivers/video/rockchip/hdmi/chips/rkpx2/Kconfig"
+endif
+
+config  HDMI_RK2928
+        bool "RK2928 HDMI support"
+        depends on LCDC_RK2928
+        help
+           Support rk2928 hdmi if you say y here
+
+if HDMI_CAT66121
+source "drivers/video/rockchip/hdmi/chips/cat66121/Kconfig"
+endif
+
+config  HDMI_RK610
+        bool "RK610 HDMI support"
+        depends on MFD_RK610
+        help
+           Support rk610 hdmi if you say y here
+
+if HDMI_RK610
+source "drivers/video/rockchip/hdmi/chips/rk610/Kconfig"
+endif
+
+config  HDMI_RK616
+        bool "RK616 HDMI support"
+        depends on MFD_RK616 || ARCH_RK3026
+		default y
+        help
+           Support rk616 hdmi if you say y here
+
+if HDMI_RK616
+source "drivers/video/rockchip/hdmi/chips/rk616/Kconfig"
+endif
+
+choice
+	prompt "HDMI Source LCDC select"
+config HDMI_SOURCE_LCDC0
+	bool "lcdc0"
+config HDMI_SOURCE_LCDC1
+	bool "lcdc1"
+endchoice

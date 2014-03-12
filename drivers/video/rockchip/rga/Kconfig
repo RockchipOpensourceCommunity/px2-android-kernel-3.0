@@ -1,0 +1,9 @@
+menu "RGA"
+	depends on ARCH_RKPX2 
+
+config RGA_RKPX2
+	tristate "ROCKCHIP RKps2"
+	help
+	  rkpx2 rga module.
+
+endmenu

@@ -1355,8 +1355,7 @@ static int qib_6120_bringup_serdes(struct qib_pportdata *ppd)
 	hwstat = qib_read_kreg64(dd, kr_hwerrstatus);
 	if (hwstat) {
 		/* should just have PLL, clear all set, in an case */
-		if (hwstat & ~QLOGIC_IB_HWE_SERDESPLLFAILED)
-			qib_write_kreg(dd, kr_hwerrclear, hwstat);
+		qib_write_kreg(dd, kr_hwerrclear, hwstat);
 		qib_write_kreg(dd, kr_errclear, ERR_MASK(HardwareErr));
 	}
 
@@ -1800,7 +1799,7 @@ static int qib_6120_setup_reset(struct qib_devdata *dd)
 	/*
 	 * Keep chip from being accessed until we are ready.  Use
 	 * writeq() directly, to allow the write even though QIB_PRESENT
-	 * isnt' set.
+	 * isn't set.
 	 */
 	dd->flags &= ~(QIB_INITTED | QIB_PRESENT);
 	dd->int_counter = 0; /* so we check interrupts work again */
@@ -2075,11 +2074,13 @@ static void qib_6120_config_ctxts(struct qib_devdata *dd)
 }
 
 static void qib_update_6120_usrhead(struct qib_ctxtdata *rcd, u64 hd,
-				    u32 updegr, u32 egrhd)
+				    u32 updegr, u32 egrhd, u32 npkts)
 {
-	qib_write_ureg(rcd->dd, ur_rcvhdrhead, hd, rcd->ctxt);
 	if (updegr)
 		qib_write_ureg(rcd->dd, ur_rcvegrindexhead, egrhd, rcd->ctxt);
+	mmiowb();
+	qib_write_ureg(rcd->dd, ur_rcvhdrhead, hd, rcd->ctxt);
+	mmiowb();
 }
 
 static u32 qib_6120_hdrqempty(struct qib_ctxtdata *rcd)
@@ -2172,7 +2173,7 @@ static void rcvctrl_6120_mod(struct qib_pportdata *ppd, unsigned int op,
 		 * Init the context registers also; if we were
 		 * disabled, tail and head should both be zero
 		 * already from the enable, but since we don't
-		 * know, we have to do it explictly.
+		 * know, we have to do it explicitly.
 		 */
 		val = qib_read_ureg32(dd, ur_rcvegrindextail, ctxt);
 		qib_write_ureg(dd, ur_rcvegrindexhead, val, ctxt);

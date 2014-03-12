@@ -161,8 +161,14 @@ struct thread_info {
 
 #define __HAVE_ARCH_THREAD_INFO_ALLOCATOR
 
-#define alloc_thread_info(tsk)						\
-	((struct thread_info *)__get_free_pages(THREAD_FLAGS, THREAD_ORDER))
+#define alloc_thread_info_node(tsk, node)				\
+({									\
+	struct page *page = alloc_pages_node(node, THREAD_FLAGS,	\
+					     THREAD_ORDER);		\
+	struct thread_info *ret = page ? page_address(page) : NULL;	\
+									\
+	ret;								\
+})
 
 #ifdef CONFIG_X86_32
 
@@ -236,8 +242,6 @@ static inline struct thread_info *current_thread_info(void)
  * ever touches our thread-synchronous status, so we don't
  * have to worry about atomic accesses.
  */
-#define TS_USEDFPU		0x0001	/* FPU was used by this task
-					   this quantum (SMP) */
 #define TS_COMPAT		0x0002	/* 32bit syscall active (64BIT)*/
 #define TS_POLLING		0x0004	/* idle task polling need_resched,
 					   skip sending interrupt */

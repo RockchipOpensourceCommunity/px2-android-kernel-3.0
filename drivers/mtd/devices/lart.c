@@ -17,7 +17,7 @@
  *           - January 2000
  *
  *    [2] MTD internal API documentation
- *           - http://www.linux-mtd.infradead.org/tech/
+ *           - http://www.linux-mtd.infradead.org/ 
  *
  * Limitations:
  *
@@ -353,7 +353,7 @@ static inline int erase_block (__u32 offset)
    /* put the flash back into command mode */
    write32 (DATA_TO_FLASH (READ_ARRAY),offset);
 
-   /* was the erase successfull? */
+   /* was the erase successful? */
    if ((status & STATUS_ERASE_ERR))
 	 {
 		printk (KERN_WARNING "%s: erase error at address 0x%.8x.\n",module_name,offset);
@@ -508,7 +508,7 @@ static inline int write_dword (__u32 offset,__u32 x)
    /* put the flash back into command mode */
    write32 (DATA_TO_FLASH (READ_ARRAY),offset);
 
-   /* was the write successfull? */
+   /* was the write successful? */
    if ((status & STATUS_PGM_ERR) || read32 (offset) != x)
 	 {
 		printk (KERN_WARNING "%s: write error at address 0x%.8x.\n",module_name,offset);
@@ -636,6 +636,7 @@ static int __init lart_flash_init (void)
    mtd.name = module_name;
    mtd.type = MTD_NORFLASH;
    mtd.writesize = 1;
+   mtd.writebufsize = 4;
    mtd.flags = MTD_CAP_NORFLASH;
    mtd.size = FLASH_BLOCKSIZE_PARAM * FLASH_NUMBLOCKS_16m_PARAM + FLASH_BLOCKSIZE_MAIN * FLASH_NUMBLOCKS_16m_MAIN;
    mtd.erasesize = FLASH_BLOCKSIZE_MAIN;
@@ -684,9 +685,10 @@ static int __init lart_flash_init (void)
 #endif
 
 #ifndef HAVE_PARTITIONS
-   result = add_mtd_device (&mtd);
+   result = mtd_device_register(&mtd, NULL, 0);
 #else
-   result = add_mtd_partitions (&mtd,lart_partitions, ARRAY_SIZE(lart_partitions));
+   result = mtd_device_register(&mtd, lart_partitions,
+                                ARRAY_SIZE(lart_partitions));
 #endif
 
    return (result);
@@ -695,9 +697,9 @@ static int __init lart_flash_init (void)
 static void __exit lart_flash_exit (void)
 {
 #ifndef HAVE_PARTITIONS
-   del_mtd_device (&mtd);
+   mtd_device_unregister(&mtd);
 #else
-   del_mtd_partitions (&mtd);
+   mtd_device_unregister(&mtd);
 #endif
 }
 

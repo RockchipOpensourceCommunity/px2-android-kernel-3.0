@@ -26,7 +26,7 @@ CHECKFLAGS	+=
 PROCESSOR	:= unset
 UNIT		:= unset
 
-KBUILD_CFLAGS	+= -mam33 -mmem-funcs -DCPU=AM33
+KBUILD_CFLAGS	+= -mam33 -DCPU=AM33 $(call cc-option,-mmem-funcs,)
 KBUILD_AFLAGS	+= -mam33 -DCPU=AM33
 
 ifeq ($(CONFIG_MN10300_CURRENT_IN_E2),y)
@@ -36,12 +36,18 @@ endif
 ifeq ($(CONFIG_MN10300_PROC_MN103E010),y)
 PROCESSOR	:= mn103e010
 endif
+ifeq ($(CONFIG_MN10300_PROC_MN2WS0050),y)
+PROCESSOR	:= mn2ws0050
+endif
 
 ifeq ($(CONFIG_MN10300_UNIT_ASB2303),y)
 UNIT		:= asb2303
 endif
 ifeq ($(CONFIG_MN10300_UNIT_ASB2305),y)
 UNIT		:= asb2305
+endif
+ifeq ($(CONFIG_MN10300_UNIT_ASB2364),y)
+UNIT		:= asb2364
 endif
 
 

@@ -37,7 +37,6 @@
 #include <linux/string.h>
 #include <linux/security.h>
 
-#define MLOG_MASK_PREFIX ML_XATTR
 #include <cluster/masklog.h>
 
 #include "ocfs2.h"
@@ -57,6 +56,7 @@
 #include "xattr.h"
 #include "refcounttree.h"
 #include "acl.h"
+#include "ocfs2_trace.h"
 
 struct ocfs2_xattr_def_value_root {
 	struct ocfs2_xattr_value_root	xv;
@@ -474,8 +474,7 @@ static int ocfs2_validate_xattr_block(struct super_block *sb,
 	struct ocfs2_xattr_block *xb =
 		(struct ocfs2_xattr_block *)bh->b_data;
 
-	mlog(0, "Validating xattr block %llu\n",
-	     (unsigned long long)bh->b_blocknr);
+	trace_ocfs2_validate_xattr_block((unsigned long long)bh->b_blocknr);
 
 	BUG_ON(!buffer_uptodate(bh));
 
@@ -709,48 +708,62 @@ static int ocfs2_xattr_extend_allocation(struct inode *inode,
 					 struct ocfs2_xattr_value_buf *vb,
 					 struct ocfs2_xattr_set_ctxt *ctxt)
 {
-	int status = 0;
+	int status = 0, credits;
 	handle_t *handle = ctxt->handle;
 	enum ocfs2_alloc_restarted why;
 	u32 prev_clusters, logical_start = le32_to_cpu(vb->vb_xv->xr_clusters);
 	struct ocfs2_extent_tree et;
 
-	mlog(0, "(clusters_to_add for xattr= %u)\n", clusters_to_add);
-
 	ocfs2_init_xattr_value_extent_tree(&et, INODE_CACHE(inode), vb);
 
-	status = vb->vb_access(handle, INODE_CACHE(inode), vb->vb_bh,
-			      OCFS2_JOURNAL_ACCESS_WRITE);
-	if (status < 0) {
-		mlog_errno(status);
-		goto leave;
+	while (clusters_to_add) {
+		trace_ocfs2_xattr_extend_allocation(clusters_to_add);
+
+		status = vb->vb_access(handle, INODE_CACHE(inode), vb->vb_bh,
+				       OCFS2_JOURNAL_ACCESS_WRITE);
+		if (status < 0) {
+			mlog_errno(status);
+			break;
+		}
+
+		prev_clusters = le32_to_cpu(vb->vb_xv->xr_clusters);
+		status = ocfs2_add_clusters_in_btree(handle,
+						     &et,
+						     &logical_start,
+						     clusters_to_add,
+						     0,
+						     ctxt->data_ac,
+						     ctxt->meta_ac,
+						     &why);
+		if ((status < 0) && (status != -EAGAIN)) {
+			if (status != -ENOSPC)
+				mlog_errno(status);
+			break;
+		}
+
+		ocfs2_journal_dirty(handle, vb->vb_bh);
+
+		clusters_to_add -= le32_to_cpu(vb->vb_xv->xr_clusters) -
+					 prev_clusters;
+
+		if (why != RESTART_NONE && clusters_to_add) {
+			/*
+			 * We can only fail in case the alloc file doesn't give
+			 * up enough clusters.
+			 */
+			BUG_ON(why == RESTART_META);
+
+			credits = ocfs2_calc_extend_credits(inode->i_sb,
+							    &vb->vb_xv->xr_list,
+							    clusters_to_add);
+			status = ocfs2_extend_trans(handle, credits);
+			if (status < 0) {
+				status = -ENOMEM;
+				mlog_errno(status);
+				break;
+			}
+		}
 	}
-
-	prev_clusters = le32_to_cpu(vb->vb_xv->xr_clusters);
-	status = ocfs2_add_clusters_in_btree(handle,
-					     &et,
-					     &logical_start,
-					     clusters_to_add,
-					     0,
-					     ctxt->data_ac,
-					     ctxt->meta_ac,
-					     &why);
-	if (status < 0) {
-		mlog_errno(status);
-		goto leave;
-	}
-
-	ocfs2_journal_dirty(handle, vb->vb_bh);
-
-	clusters_to_add -= le32_to_cpu(vb->vb_xv->xr_clusters) - prev_clusters;
-
-	/*
-	 * We should have already allocated enough space before the transaction,
-	 * so no need to restart.
-	 */
-	BUG_ON(why != RESTART_NONE || clusters_to_add);
-
-leave:
 
 	return status;
 }
@@ -1270,13 +1283,11 @@ int ocfs2_xattr_get_nolock(struct inode *inode,
 	xis.inode_bh = xbs.inode_bh = di_bh;
 	di = (struct ocfs2_dinode *)di_bh->b_data;
 
-	down_read(&oi->ip_xattr_sem);
 	ret = ocfs2_xattr_ibody_get(inode, name_index, name, buffer,
 				    buffer_size, &xis);
 	if (ret == -ENODATA && di->i_xattr_loc)
 		ret = ocfs2_xattr_block_get(inode, name_index, name, buffer,
 					    buffer_size, &xbs);
-	up_read(&oi->ip_xattr_sem);
 
 	return ret;
 }
@@ -1300,8 +1311,10 @@ static int ocfs2_xattr_get(struct inode *inode,
 		mlog_errno(ret);
 		return ret;
 	}
+	down_read(&OCFS2_I(inode)->ip_xattr_sem);
 	ret = ocfs2_xattr_get_nolock(inode, di_bh, name_index,
 				     name, buffer, buffer_size);
+	up_read(&OCFS2_I(inode)->ip_xattr_sem);
 
 	ocfs2_inode_unlock(inode, 0);
 
@@ -3230,8 +3243,8 @@ static int ocfs2_init_xattr_set_ctxt(struct inode *inode,
 	}
 
 	meta_add += extra_meta;
-	mlog(0, "Set xattr %s, reserve meta blocks = %d, clusters = %d, "
-	     "credits = %d\n", xi->xi_name, meta_add, clusters_add, *credits);
+	trace_ocfs2_init_xattr_set_ctxt(xi->xi_name, meta_add,
+					clusters_add, *credits);
 
 	if (meta_add) {
 		ret = ocfs2_reserve_new_metadata_blocks(osb, meta_add,
@@ -3541,7 +3554,7 @@ int ocfs2_xattr_set(struct inode *inode,
 	down_write(&OCFS2_I(inode)->ip_xattr_sem);
 	/*
 	 * Scan inode and external block to find the same name
-	 * extended attribute and collect search infomation.
+	 * extended attribute and collect search information.
 	 */
 	ret = ocfs2_xattr_ibody_find(inode, name_index, name, &xis);
 	if (ret)
@@ -3565,7 +3578,7 @@ int ocfs2_xattr_set(struct inode *inode,
 			goto cleanup;
 	}
 
-	/* Check whether the value is refcounted and do some prepartion. */
+	/* Check whether the value is refcounted and do some preparation. */
 	if (OCFS2_I(inode)->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL &&
 	    (!xis.not_found || !xbs.not_found)) {
 		ret = ocfs2_prepare_refcount_xattr(inode, di, &xi,
@@ -3871,8 +3884,10 @@ static int ocfs2_xattr_bucket_find(struct inode *inode,
 
 	if (found) {
 		xs->here = &xs->header->xh_entries[index];
-		mlog(0, "find xattr %s in bucket %llu, entry = %u\n", name,
-		     (unsigned long long)bucket_blkno(xs->bucket), index);
+		trace_ocfs2_xattr_bucket_find(OCFS2_I(inode)->ip_blkno,
+			name, name_index, name_hash,
+			(unsigned long long)bucket_blkno(xs->bucket),
+			index);
 	} else
 		ret = -ENODATA;
 
@@ -3899,8 +3914,10 @@ static int ocfs2_xattr_index_block_find(struct inode *inode,
 	if (le16_to_cpu(el->l_next_free_rec) == 0)
 		return -ENODATA;
 
-	mlog(0, "find xattr %s, hash = %u, index = %d in xattr tree\n",
-	     name, name_hash, name_index);
+	trace_ocfs2_xattr_index_block_find(OCFS2_I(inode)->ip_blkno,
+					name, name_index, name_hash,
+					(unsigned long long)root_bh->b_blocknr,
+					-1);
 
 	ret = ocfs2_xattr_get_rec(inode, name_hash, &p_blkno, &first_hash,
 				  &num_clusters, el);
@@ -3911,9 +3928,10 @@ static int ocfs2_xattr_index_block_find(struct inode *inode,
 
 	BUG_ON(p_blkno == 0 || num_clusters == 0 || first_hash > name_hash);
 
-	mlog(0, "find xattr extent rec %u clusters from %llu, the first hash "
-	     "in the rec is %u\n", num_clusters, (unsigned long long)p_blkno,
-	     first_hash);
+	trace_ocfs2_xattr_index_block_find_rec(OCFS2_I(inode)->ip_blkno,
+					name, name_index, first_hash,
+					(unsigned long long)p_blkno,
+					num_clusters);
 
 	ret = ocfs2_xattr_bucket_find(inode, name_index, name, name_hash,
 				      p_blkno, first_hash, num_clusters, xs);
@@ -3939,8 +3957,9 @@ static int ocfs2_iterate_xattr_buckets(struct inode *inode,
 		return -ENOMEM;
 	}
 
-	mlog(0, "iterating xattr buckets in %u clusters starting from %llu\n",
-	     clusters, (unsigned long long)blkno);
+	trace_ocfs2_iterate_xattr_buckets(
+		(unsigned long long)OCFS2_I(inode)->ip_blkno,
+		(unsigned long long)blkno, clusters);
 
 	for (i = 0; i < num_buckets; i++, blkno += bucket->bu_blocks) {
 		ret = ocfs2_read_xattr_bucket(bucket, blkno);
@@ -3956,8 +3975,7 @@ static int ocfs2_iterate_xattr_buckets(struct inode *inode,
 		if (i == 0)
 			num_buckets = le16_to_cpu(bucket_xh(bucket)->xh_num_buckets);
 
-		mlog(0, "iterating xattr bucket %llu, first hash %u\n",
-		     (unsigned long long)blkno,
+		trace_ocfs2_iterate_xattr_bucket((unsigned long long)blkno,
 		     le32_to_cpu(bucket_xh(bucket)->xh_entries[0].xe_name_hash));
 		if (func) {
 			ret = func(inode, bucket, para);
@@ -4157,9 +4175,9 @@ static void ocfs2_cp_xattr_block_to_bucket(struct inode *inode,
 	char *src = xb_bh->b_data;
 	char *target = bucket_block(bucket, blks - 1);
 
-	mlog(0, "cp xattr from block %llu to bucket %llu\n",
-	     (unsigned long long)xb_bh->b_blocknr,
-	     (unsigned long long)bucket_blkno(bucket));
+	trace_ocfs2_cp_xattr_block_to_bucket_begin(
+				(unsigned long long)xb_bh->b_blocknr,
+				(unsigned long long)bucket_blkno(bucket));
 
 	for (i = 0; i < blks; i++)
 		memset(bucket_block(bucket, i), 0, blocksize);
@@ -4195,8 +4213,7 @@ static void ocfs2_cp_xattr_block_to_bucket(struct inode *inode,
 	for (i = 0; i < count; i++)
 		le16_add_cpu(&xh->xh_entries[i].xe_name_offset, off_change);
 
-	mlog(0, "copy entry: start = %u, size = %u, offset_change = %u\n",
-	     offset, size, off_change);
+	trace_ocfs2_cp_xattr_block_to_bucket_end(offset, size, off_change);
 
 	sort(target + offset, count, sizeof(struct ocfs2_xattr_entry),
 	     cmp_xe, swap_xe);
@@ -4245,8 +4262,8 @@ static int ocfs2_xattr_create_index_block(struct inode *inode,
 	struct ocfs2_xattr_tree_root *xr;
 	u16 xb_flags = le16_to_cpu(xb->xb_flags);
 
-	mlog(0, "create xattr index block for %llu\n",
-	     (unsigned long long)xb_bh->b_blocknr);
+	trace_ocfs2_xattr_create_index_block_begin(
+				(unsigned long long)xb_bh->b_blocknr);
 
 	BUG_ON(xb_flags & OCFS2_XATTR_INDEXED);
 	BUG_ON(!xs->bucket);
@@ -4279,8 +4296,7 @@ static int ocfs2_xattr_create_index_block(struct inode *inode,
 	 */
 	blkno = ocfs2_clusters_to_blocks(inode->i_sb, bit_off);
 
-	mlog(0, "allocate 1 cluster from %llu to xattr block\n",
-	     (unsigned long long)blkno);
+	trace_ocfs2_xattr_create_index_block((unsigned long long)blkno);
 
 	ret = ocfs2_init_xattr_bucket(xs->bucket, blkno);
 	if (ret) {
@@ -4384,8 +4400,7 @@ static int ocfs2_defrag_xattr_bucket(struct inode *inode,
 	entries = (char *)xh->xh_entries;
 	xh_free_start = le16_to_cpu(xh->xh_free_start);
 
-	mlog(0, "adjust xattr bucket in %llu, count = %u, "
-	     "xh_free_start = %u, xh_name_value_len = %u.\n",
+	trace_ocfs2_defrag_xattr_bucket(
 	     (unsigned long long)blkno, le16_to_cpu(xh->xh_count),
 	     xh_free_start, le16_to_cpu(xh->xh_name_value_len));
 
@@ -4487,8 +4502,9 @@ static int ocfs2_mv_xattr_bucket_cross_cluster(struct inode *inode,
 	BUG_ON(le16_to_cpu(bucket_xh(first)->xh_num_buckets) < num_buckets);
 	BUG_ON(OCFS2_XATTR_BUCKET_SIZE == OCFS2_SB(sb)->s_clustersize);
 
-	mlog(0, "move half of xattrs in cluster %llu to %llu\n",
-	     (unsigned long long)last_cluster_blkno, (unsigned long long)new_blkno);
+	trace_ocfs2_mv_xattr_bucket_cross_cluster(
+				(unsigned long long)last_cluster_blkno,
+				(unsigned long long)new_blkno);
 
 	ret = ocfs2_mv_xattr_buckets(inode, handle, bucket_blkno(first),
 				     last_cluster_blkno, new_blkno,
@@ -4598,8 +4614,8 @@ static int ocfs2_divide_xattr_bucket(struct inode *inode,
 	struct ocfs2_xattr_entry *xe;
 	int blocksize = inode->i_sb->s_blocksize;
 
-	mlog(0, "move some of xattrs from bucket %llu to %llu\n",
-	     (unsigned long long)blk, (unsigned long long)new_blk);
+	trace_ocfs2_divide_xattr_bucket_begin((unsigned long long)blk,
+					      (unsigned long long)new_blk);
 
 	s_bucket = ocfs2_xattr_bucket_new(inode);
 	t_bucket = ocfs2_xattr_bucket_new(inode);
@@ -4698,9 +4714,9 @@ static int ocfs2_divide_xattr_bucket(struct inode *inode,
 	 */
 	xe = &xh->xh_entries[start];
 	len = sizeof(struct ocfs2_xattr_entry) * (count - start);
-	mlog(0, "mv xattr entry len %d from %d to %d\n", len,
-	     (int)((char *)xe - (char *)xh),
-	     (int)((char *)xh->xh_entries - (char *)xh));
+	trace_ocfs2_divide_xattr_bucket_move(len,
+			(int)((char *)xe - (char *)xh),
+			(int)((char *)xh->xh_entries - (char *)xh));
 	memmove((char *)xh->xh_entries, (char *)xe, len);
 	xe = &xh->xh_entries[count - start];
 	len = sizeof(struct ocfs2_xattr_entry) * start;
@@ -4772,9 +4788,9 @@ static int ocfs2_cp_xattr_bucket(struct inode *inode,
 
 	BUG_ON(s_blkno == t_blkno);
 
-	mlog(0, "cp bucket %llu to %llu, target is %d\n",
-	     (unsigned long long)s_blkno, (unsigned long long)t_blkno,
-	     t_is_new);
+	trace_ocfs2_cp_xattr_bucket((unsigned long long)s_blkno,
+				    (unsigned long long)t_blkno,
+				    t_is_new);
 
 	s_bucket = ocfs2_xattr_bucket_new(inode);
 	t_bucket = ocfs2_xattr_bucket_new(inode);
@@ -4846,8 +4862,8 @@ static int ocfs2_mv_xattr_buckets(struct inode *inode, handle_t *handle,
 	int num_buckets = ocfs2_xattr_buckets_per_cluster(osb);
 	struct ocfs2_xattr_bucket *old_first, *new_first;
 
-	mlog(0, "mv xattrs from cluster %llu to %llu\n",
-	     (unsigned long long)last_blk, (unsigned long long)to_blk);
+	trace_ocfs2_mv_xattr_buckets((unsigned long long)last_blk,
+				     (unsigned long long)to_blk);
 
 	BUG_ON(start_bucket >= num_buckets);
 	if (start_bucket) {
@@ -4997,9 +5013,9 @@ static int ocfs2_adjust_xattr_cross_cluster(struct inode *inode,
 {
 	int ret;
 
-	mlog(0, "adjust xattrs from cluster %llu len %u to %llu\n",
-	     (unsigned long long)bucket_blkno(first), prev_clusters,
-	     (unsigned long long)new_blk);
+	trace_ocfs2_adjust_xattr_cross_cluster(
+			(unsigned long long)bucket_blkno(first),
+			(unsigned long long)new_blk, prev_clusters);
 
 	if (ocfs2_xattr_buckets_per_cluster(OCFS2_SB(inode->i_sb)) > 1) {
 		ret = ocfs2_mv_xattr_bucket_cross_cluster(inode,
@@ -5072,10 +5088,10 @@ static int ocfs2_add_new_xattr_cluster(struct inode *inode,
 	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
 	struct ocfs2_extent_tree et;
 
-	mlog(0, "Add new xattr cluster for %llu, previous xattr hash = %u, "
-	     "previous xattr blkno = %llu\n",
-	     (unsigned long long)OCFS2_I(inode)->ip_blkno,
-	     prev_cpos, (unsigned long long)bucket_blkno(first));
+	trace_ocfs2_add_new_xattr_cluster_begin(
+		(unsigned long long)OCFS2_I(inode)->ip_blkno,
+		(unsigned long long)bucket_blkno(first),
+		prev_cpos, prev_clusters);
 
 	ocfs2_init_xattr_tree_extent_tree(&et, INODE_CACHE(inode), root_bh);
 
@@ -5097,8 +5113,7 @@ static int ocfs2_add_new_xattr_cluster(struct inode *inode,
 	BUG_ON(num_bits > clusters_to_add);
 
 	block = ocfs2_clusters_to_blocks(osb->sb, bit_off);
-	mlog(0, "Allocating %u clusters at block %u for xattr in inode %llu\n",
-	     num_bits, bit_off, (unsigned long long)OCFS2_I(inode)->ip_blkno);
+	trace_ocfs2_add_new_xattr_cluster((unsigned long long)block, num_bits);
 
 	if (bucket_blkno(first) + (prev_clusters * bpc) == block &&
 	    (prev_clusters + num_bits) << osb->s_clustersize_bits <=
@@ -5114,8 +5129,6 @@ static int ocfs2_add_new_xattr_cluster(struct inode *inode,
 		 */
 		v_start = prev_cpos + prev_clusters;
 		*num_clusters = prev_clusters + num_bits;
-		mlog(0, "Add contiguous %u clusters to previous extent rec.\n",
-		     num_bits);
 	} else {
 		ret = ocfs2_adjust_xattr_cross_cluster(inode,
 						       handle,
@@ -5131,8 +5144,8 @@ static int ocfs2_add_new_xattr_cluster(struct inode *inode,
 		}
 	}
 
-	mlog(0, "Insert %u clusters at block %llu for xattr at %u\n",
-	     num_bits, (unsigned long long)block, v_start);
+	trace_ocfs2_add_new_xattr_cluster_insert((unsigned long long)block,
+						 v_start, num_bits);
 	ret = ocfs2_insert_extent(handle, &et, v_start, block,
 				  num_bits, 0, ctxt->meta_ac);
 	if (ret < 0) {
@@ -5167,9 +5180,9 @@ static int ocfs2_extend_xattr_bucket(struct inode *inode,
 	u64 end_blk;
 	u16 new_bucket = le16_to_cpu(bucket_xh(first)->xh_num_buckets);
 
-	mlog(0, "extend xattr bucket in %llu, xattr extend rec starting "
-	     "from %llu, len = %u\n", (unsigned long long)target_blk,
-	     (unsigned long long)bucket_blkno(first), num_clusters);
+	trace_ocfs2_extend_xattr_bucket((unsigned long long)target_blk,
+					(unsigned long long)bucket_blkno(first),
+					num_clusters, new_bucket);
 
 	/* The extent must have room for an additional bucket */
 	BUG_ON(new_bucket >=
@@ -5249,8 +5262,8 @@ static int ocfs2_add_new_xattr_bucket(struct inode *inode,
 	/* The bucket at the front of the extent */
 	struct ocfs2_xattr_bucket *first;
 
-	mlog(0, "Add new xattr bucket starting from %llu\n",
-	     (unsigned long long)bucket_blkno(target));
+	trace_ocfs2_add_new_xattr_bucket(
+				(unsigned long long)bucket_blkno(target));
 
 	/* The first bucket of the original extent */
 	first = ocfs2_xattr_bucket_new(inode);
@@ -5366,8 +5379,8 @@ static int ocfs2_xattr_bucket_value_truncate(struct inode *inode,
 	 * modified something.  We have to assume they did, and dirty
 	 * the whole bucket.  This leaves us in a consistent state.
 	 */
-	mlog(0, "truncate %u in xattr bucket %llu to %d bytes.\n",
-	     xe_off, (unsigned long long)bucket_blkno(bucket), len);
+	trace_ocfs2_xattr_bucket_value_truncate(
+			(unsigned long long)bucket_blkno(bucket), xe_off, len);
 	ret = ocfs2_xattr_value_truncate(inode, &vb, len, ctxt);
 	if (ret) {
 		mlog_errno(ret);
@@ -5417,8 +5430,9 @@ static int ocfs2_rm_xattr_cluster(struct inode *inode,
 
 	ocfs2_init_dealloc_ctxt(&dealloc);
 
-	mlog(0, "rm xattr extent rec at %u len = %u, start from %llu\n",
-	     cpos, len, (unsigned long long)blkno);
+	trace_ocfs2_rm_xattr_cluster(
+			(unsigned long long)OCFS2_I(inode)->ip_blkno,
+			(unsigned long long)blkno, cpos, len);
 
 	ocfs2_remove_xattr_clusters_from_cache(INODE_CACHE(inode), blkno,
 					       len);
@@ -5522,7 +5536,7 @@ static int ocfs2_xattr_set_entry_bucket(struct inode *inode,
 	int ret;
 	struct ocfs2_xa_loc loc;
 
-	mlog_entry("Set xattr %s in xattr bucket\n", xi->xi_name);
+	trace_ocfs2_xattr_set_entry_bucket(xi->xi_name);
 
 	ocfs2_init_xattr_bucket_xa_loc(&loc, xs->bucket,
 				       xs->not_found ? NULL : xs->here);
@@ -5554,7 +5568,6 @@ static int ocfs2_xattr_set_entry_bucket(struct inode *inode,
 
 
 out:
-	mlog_exit(ret);
 	return ret;
 }
 
@@ -5565,7 +5578,7 @@ static int ocfs2_xattr_set_entry_index_block(struct inode *inode,
 {
 	int ret;
 
-	mlog_entry("Set xattr %s in xattr index block\n", xi->xi_name);
+	trace_ocfs2_xattr_set_entry_index_block(xi->xi_name);
 
 	ret = ocfs2_xattr_set_entry_bucket(inode, xi, xs, ctxt);
 	if (!ret)
@@ -5621,7 +5634,6 @@ static int ocfs2_xattr_set_entry_index_block(struct inode *inode,
 		mlog_errno(ret);
 
 out:
-	mlog_exit(ret);
 	return ret;
 }
 
@@ -6025,9 +6037,9 @@ static int ocfs2_xattr_bucket_value_refcount(struct inode *inode,
 	if (ocfs2_meta_ecc(OCFS2_SB(inode->i_sb)))
 		p = &refcount;
 
-	mlog(0, "refcount bucket %llu, count = %u\n",
-	     (unsigned long long)bucket_blkno(bucket),
-	     le16_to_cpu(xh->xh_count));
+	trace_ocfs2_xattr_bucket_value_refcount(
+				(unsigned long long)bucket_blkno(bucket),
+				le16_to_cpu(xh->xh_count));
 	for (i = 0; i < le16_to_cpu(xh->xh_count); i++) {
 		xe = &xh->xh_entries[i];
 
@@ -6323,8 +6335,8 @@ static int ocfs2_reflink_xattr_header(handle_t *handle,
 	u32 clusters, cpos, p_cluster, num_clusters;
 	unsigned int ext_flags = 0;
 
-	mlog(0, "reflink xattr in container %llu, count = %u\n",
-	     (unsigned long long)old_bh->b_blocknr, le16_to_cpu(xh->xh_count));
+	trace_ocfs2_reflink_xattr_header((unsigned long long)old_bh->b_blocknr,
+					 le16_to_cpu(xh->xh_count));
 
 	last = &new_xh->xh_entries[le16_to_cpu(new_xh->xh_count)];
 	for (i = 0, j = 0; i < le16_to_cpu(xh->xh_count); i++, j++) {
@@ -6524,8 +6536,8 @@ static int ocfs2_create_empty_xattr_block(struct inode *inode,
 		goto out;
 	}
 
-	mlog(0, "create new xattr block for inode %llu, index = %d\n",
-	     (unsigned long long)fe_bh->b_blocknr, indexed);
+	trace_ocfs2_create_empty_xattr_block(
+				(unsigned long long)fe_bh->b_blocknr, indexed);
 	ret = ocfs2_create_xattr_block(inode, fe_bh, &ctxt, indexed,
 				       ret_bh);
 	if (ret)
@@ -6788,16 +6800,15 @@ out:
 	return ret;
 }
 
-static int ocfs2_reflink_xattr_buckets(handle_t *handle,
+static int ocfs2_reflink_xattr_bucket(handle_t *handle,
 				u64 blkno, u64 new_blkno, u32 clusters,
+				u32 *cpos, int num_buckets,
 				struct ocfs2_alloc_context *meta_ac,
 				struct ocfs2_alloc_context *data_ac,
 				struct ocfs2_reflink_xattr_tree_args *args)
 {
 	int i, j, ret = 0;
 	struct super_block *sb = args->reflink->old_inode->i_sb;
-	u32 bpc = ocfs2_xattr_buckets_per_cluster(OCFS2_SB(sb));
-	u32 num_buckets = clusters * bpc;
 	int bpb = args->old_bucket->bu_blocks;
 	struct ocfs2_xattr_value_buf vb = {
 		.vb_access = ocfs2_journal_access,
@@ -6816,14 +6827,6 @@ static int ocfs2_reflink_xattr_buckets(handle_t *handle,
 			break;
 		}
 
-		/*
-		 * The real bucket num in this series of blocks is stored
-		 * in the 1st bucket.
-		 */
-		if (i == 0)
-			num_buckets = le16_to_cpu(
-				bucket_xh(args->old_bucket)->xh_num_buckets);
-
 		ret = ocfs2_xattr_bucket_journal_access(handle,
 						args->new_bucket,
 						OCFS2_JOURNAL_ACCESS_CREATE);
@@ -6836,6 +6839,18 @@ static int ocfs2_reflink_xattr_buckets(handle_t *handle,
 			memcpy(bucket_block(args->new_bucket, j),
 			       bucket_block(args->old_bucket, j),
 			       sb->s_blocksize);
+
+		/*
+		 * Record the start cpos so that we can use it to initialize
+		 * our xattr tree we also set the xh_num_bucket for the new
+		 * bucket.
+		 */
+		if (i == 0) {
+			*cpos = le32_to_cpu(bucket_xh(args->new_bucket)->
+					    xh_entries[0].xe_name_hash);
+			bucket_xh(args->new_bucket)->xh_num_buckets =
+				cpu_to_le16(num_buckets);
+		}
 
 		ocfs2_xattr_bucket_journal_dirty(handle, args->new_bucket);
 
@@ -6866,6 +6881,7 @@ static int ocfs2_reflink_xattr_buckets(handle_t *handle,
 		}
 
 		ocfs2_xattr_bucket_journal_dirty(handle, args->new_bucket);
+
 		ocfs2_xattr_bucket_relse(args->old_bucket);
 		ocfs2_xattr_bucket_relse(args->new_bucket);
 	}
@@ -6874,6 +6890,75 @@ static int ocfs2_reflink_xattr_buckets(handle_t *handle,
 	ocfs2_xattr_bucket_relse(args->new_bucket);
 	return ret;
 }
+
+static int ocfs2_reflink_xattr_buckets(handle_t *handle,
+				struct inode *inode,
+				struct ocfs2_reflink_xattr_tree_args *args,
+				struct ocfs2_extent_tree *et,
+				struct ocfs2_alloc_context *meta_ac,
+				struct ocfs2_alloc_context *data_ac,
+				u64 blkno, u32 cpos, u32 len)
+{
+	int ret, first_inserted = 0;
+	u32 p_cluster, num_clusters, reflink_cpos = 0;
+	u64 new_blkno;
+	unsigned int num_buckets, reflink_buckets;
+	unsigned int bpc =
+		ocfs2_xattr_buckets_per_cluster(OCFS2_SB(inode->i_sb));
+
+	ret = ocfs2_read_xattr_bucket(args->old_bucket, blkno);
+	if (ret) {
+		mlog_errno(ret);
+		goto out;
+	}
+	num_buckets = le16_to_cpu(bucket_xh(args->old_bucket)->xh_num_buckets);
+	ocfs2_xattr_bucket_relse(args->old_bucket);
+
+	while (len && num_buckets) {
+		ret = ocfs2_claim_clusters(handle, data_ac,
+					   1, &p_cluster, &num_clusters);
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+
+		new_blkno = ocfs2_clusters_to_blocks(inode->i_sb, p_cluster);
+		reflink_buckets = min(num_buckets, bpc * num_clusters);
+
+		ret = ocfs2_reflink_xattr_bucket(handle, blkno,
+						 new_blkno, num_clusters,
+						 &reflink_cpos, reflink_buckets,
+						 meta_ac, data_ac, args);
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+
+		/*
+		 * For the 1st allocated cluster, we make it use the same cpos
+		 * so that the xattr tree looks the same as the original one
+		 * in the most case.
+		 */
+		if (!first_inserted) {
+			reflink_cpos = cpos;
+			first_inserted = 1;
+		}
+		ret = ocfs2_insert_extent(handle, et, reflink_cpos, new_blkno,
+					  num_clusters, 0, meta_ac);
+		if (ret)
+			mlog_errno(ret);
+
+		trace_ocfs2_reflink_xattr_buckets((unsigned long long)new_blkno,
+						  num_clusters, reflink_cpos);
+
+		len -= num_clusters;
+		blkno += ocfs2_clusters_to_blocks(inode->i_sb, num_clusters);
+		num_buckets -= reflink_buckets;
+	}
+out:
+	return ret;
+}
+
 /*
  * Create the same xattr extent record in the new inode's xattr tree.
  */
@@ -6885,8 +6970,6 @@ static int ocfs2_reflink_xattr_rec(struct inode *inode,
 				   void *para)
 {
 	int ret, credits = 0;
-	u32 p_cluster, num_clusters;
-	u64 new_blkno;
 	handle_t *handle;
 	struct ocfs2_reflink_xattr_tree_args *args =
 			(struct ocfs2_reflink_xattr_tree_args *)para;
@@ -6894,6 +6977,8 @@ static int ocfs2_reflink_xattr_rec(struct inode *inode,
 	struct ocfs2_alloc_context *meta_ac = NULL;
 	struct ocfs2_alloc_context *data_ac = NULL;
 	struct ocfs2_extent_tree et;
+
+	trace_ocfs2_reflink_xattr_rec((unsigned long long)blkno, len);
 
 	ocfs2_init_xattr_tree_extent_tree(&et,
 					  INODE_CACHE(args->reflink->new_inode),
@@ -6914,32 +6999,12 @@ static int ocfs2_reflink_xattr_rec(struct inode *inode,
 		goto out;
 	}
 
-	ret = ocfs2_claim_clusters(handle, data_ac,
-				   len, &p_cluster, &num_clusters);
-	if (ret) {
-		mlog_errno(ret);
-		goto out_commit;
-	}
-
-	new_blkno = ocfs2_clusters_to_blocks(osb->sb, p_cluster);
-
-	mlog(0, "reflink xattr buckets %llu to %llu, len %u\n",
-	     (unsigned long long)blkno, (unsigned long long)new_blkno, len);
-	ret = ocfs2_reflink_xattr_buckets(handle, blkno, new_blkno, len,
-					  meta_ac, data_ac, args);
-	if (ret) {
-		mlog_errno(ret);
-		goto out_commit;
-	}
-
-	mlog(0, "insert new xattr extent rec start %llu len %u to %u\n",
-	     (unsigned long long)new_blkno, len, cpos);
-	ret = ocfs2_insert_extent(handle, &et, cpos, new_blkno,
-				  len, 0, meta_ac);
+	ret = ocfs2_reflink_xattr_buckets(handle, inode, args, &et,
+					  meta_ac, data_ac,
+					  blkno, cpos, len);
 	if (ret)
 		mlog_errno(ret);
 
-out_commit:
 	ocfs2_commit_trans(osb, handle);
 
 out:
@@ -7011,7 +7076,7 @@ static int ocfs2_reflink_xattr_in_block(struct ocfs2_xattr_reflink *args,
 		goto out;
 	}
 
-	if (!(le16_to_cpu(xb->xb_flags) & OCFS2_XATTR_INDEXED))
+	if (!indexed)
 		ret = ocfs2_reflink_xattr_block(args, blk_bh, new_blk_bh);
 	else
 		ret = ocfs2_reflink_xattr_tree(args, blk_bh, new_blk_bh);
@@ -7115,7 +7180,8 @@ out:
  * must not hold any lock expect i_mutex.
  */
 int ocfs2_init_security_and_acl(struct inode *dir,
-				struct inode *inode)
+				struct inode *inode,
+				const struct qstr *qstr)
 {
 	int ret = 0;
 	struct buffer_head *dir_bh = NULL;
@@ -7123,7 +7189,7 @@ int ocfs2_init_security_and_acl(struct inode *dir,
 		.enable = 1,
 	};
 
-	ret = ocfs2_init_security_get(inode, dir, &si);
+	ret = ocfs2_init_security_get(inode, dir, qstr, &si);
 	if (!ret) {
 		ret = ocfs2_xattr_set(inode, OCFS2_XATTR_INDEX_SECURITY,
 				      si.name, si.value, si.value_len,
@@ -7191,13 +7257,14 @@ static int ocfs2_xattr_security_set(struct dentry *dentry, const char *name,
 
 int ocfs2_init_security_get(struct inode *inode,
 			    struct inode *dir,
+			    const struct qstr *qstr,
 			    struct ocfs2_security_xattr_info *si)
 {
 	/* check whether ocfs2 support feature xattr */
 	if (!ocfs2_supports_xattr(OCFS2_SB(dir->i_sb)))
 		return -EOPNOTSUPP;
-	return security_inode_init_security(inode, dir, &si->name, &si->value,
-					    &si->value_len);
+	return security_inode_init_security(inode, dir, qstr, &si->name,
+					    &si->value, &si->value_len);
 }
 
 int ocfs2_init_security_set(handle_t *handle,

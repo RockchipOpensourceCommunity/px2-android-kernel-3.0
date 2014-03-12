@@ -94,7 +94,7 @@ ep_matches (
 				/* bulk endpoints handle interrupt transfers,
 				 * except the toggle-quirky iso-synch kind
 				 */
-				if ('s' == tmp[2])	// == "-iso"
+				if ('n' != tmp[2])	// == "-int"
 					return 0;
 				/* for now, avoid PXA "interrupt-in";
 				 * it's documented as never using DATA1.
@@ -112,6 +112,10 @@ ep_matches (
 					return 0;
 			}
 		} else {
+#ifdef CONFIG_ARCH_RK29
+    		if (USB_ENDPOINT_XFER_INT == type)
+    		    return 0;
+#endif    		    
 			tmp = ep->name + strlen (ep->name);
 		}
 
@@ -128,6 +132,13 @@ ep_matches (
 		}
 	}
 
+	/*
+	 * If the protocol driver hasn't yet decided on wMaxPacketSize
+	 * and wants to know the maximum possible, provide the info.
+	 */
+	if (desc->wMaxPacketSize == 0)
+		desc->wMaxPacketSize = cpu_to_le16(ep->maxpacket);
+
 	/* endpoint maxpacket size is an input parameter, except for bulk
 	 * where it's an output parameter representing the full speed limit.
 	 * the usb spec fixes high speed bulk maxpacket at 512 bytes.
@@ -138,6 +149,7 @@ ep_matches (
 		/* INT:  limit 64 bytes full speed, 1024 high speed */
 		if (!gadget->is_dualspeed && max > 64)
 			return 0;
+		break;
 		/* FALLTHROUGH */
 
 	case USB_ENDPOINT_XFER_ISOC:

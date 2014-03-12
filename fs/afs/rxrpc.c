@@ -100,6 +100,7 @@ int afs_open_socket(void)
 	ret = kernel_bind(socket, (struct sockaddr *) &srx, sizeof(srx));
 	if (ret < 0) {
 		sock_release(socket);
+		destroy_workqueue(afs_async_calls);
 		_leave(" = %d [bind]", ret);
 		return ret;
 	}
@@ -313,6 +314,7 @@ int afs_make_call(struct in_addr *addr, struct afs_call *call, gfp_t gfp,
 	struct msghdr msg;
 	struct kvec iov[1];
 	int ret;
+	struct sk_buff *skb;
 
 	_enter("%x,{%d},", addr->s_addr, ntohs(call->port));
 
@@ -379,6 +381,8 @@ int afs_make_call(struct in_addr *addr, struct afs_call *call, gfp_t gfp,
 
 error_do_abort:
 	rxrpc_kernel_abort_call(rxcall, RX_USER_ABORT);
+	while ((skb = skb_dequeue(&call->rx_queue)))
+		afs_free_skb(skb);
 	rxrpc_kernel_end_call(rxcall);
 	call->rxcall = NULL;
 error_kill_call:
@@ -409,7 +413,7 @@ static void afs_rx_interceptor(struct sock *sk, unsigned long user_call_ID,
 	if (!call) {
 		/* its an incoming call for our callback service */
 		skb_queue_tail(&afs_incoming_calls, skb);
-		schedule_work(&afs_collect_incoming_call_work);
+		queue_work(afs_wq, &afs_collect_incoming_call_work);
 	} else {
 		/* route the messages directly to the appropriate call */
 		skb_queue_tail(&call->rx_queue, skb);

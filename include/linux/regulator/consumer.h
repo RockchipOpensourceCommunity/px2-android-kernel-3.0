@@ -153,7 +153,13 @@ int regulator_list_voltage(struct regulator *regulator, unsigned selector);
 int regulator_is_supported_voltage(struct regulator *regulator,
 				   int min_uV, int max_uV);
 int regulator_set_voltage(struct regulator *regulator, int min_uV, int max_uV);
+#ifdef CONFIG_PLAT_RK
+int regulator_set_suspend_voltage(struct regulator *regulator, int uV);
+#endif
+int regulator_set_voltage_time(struct regulator *regulator,
+			       int old_uV, int new_uV);
 int regulator_get_voltage(struct regulator *regulator);
+int regulator_sync_voltage(struct regulator *regulator);
 int regulator_set_current_limit(struct regulator *regulator,
 			       int min_uA, int max_uA);
 int regulator_get_current_limit(struct regulator *regulator);
@@ -239,6 +245,13 @@ static inline int regulator_set_voltage(struct regulator *regulator,
 {
 	return 0;
 }
+
+#ifdef CONFIG_PLAT_RK
+static inline int regulator_set_suspend_voltage(struct regulator *regulator, int uV)
+{
+	return 0;
+}
+#endif
 
 static inline int regulator_get_voltage(struct regulator *regulator)
 {

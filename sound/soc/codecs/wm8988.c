@@ -28,7 +28,19 @@
 #include <sound/soc-dapm.h>
 #include <sound/initval.h>
 
+#include <mach/iomux.h>
+#include <mach/gpio.h>
+
 #include "wm8988.h"
+
+#include <linux/proc_fs.h>
+#include <linux/gpio.h>
+
+#if 0
+#define DBG(x...) printk(KERN_INFO x)
+#else
+#define DBG(x...) do { } while (0)
+#endif
 
 /*
  * wm8988 register cache
@@ -52,9 +64,10 @@ static const u16 wm8988_reg[] = {
 /* codec private data */
 struct wm8988_priv {
 	unsigned int sysclk;
-	struct snd_soc_codec codec;
+	enum snd_soc_control_type control_type;
 	struct snd_pcm_hw_constraint_list *sysclk_constraints;
-	u16 reg_cache[WM8988_NUM_REG];
+	int is_startup;		// gModify.Add
+	int is_biason;
 };
 
 
@@ -192,6 +205,8 @@ static int wm8988_lrc_control(struct snd_soc_dapm_widget *w,
 	else
 		adctl2 |= 0x4;
 
+	DBG("Enter::%s----%d, adctl2 = %x\n",__FUNCTION__,__LINE__,adctl2);
+	
 	return snd_soc_write(codec, WM8988_ADCTL2, adctl2);
 }
 
@@ -292,8 +307,9 @@ static const struct snd_soc_dapm_widget wm8988_dapm_widgets[] = {
 	SND_SOC_DAPM_ADC("Right ADC", "Right Capture", WM8988_PWR1, 2, 0),
 	SND_SOC_DAPM_ADC("Left ADC", "Left Capture", WM8988_PWR1, 3, 0),
 
-	SND_SOC_DAPM_DAC("Right DAC", "Right Playback", WM8988_PWR2, 7, 0),
-	SND_SOC_DAPM_DAC("Left DAC", "Left Playback", WM8988_PWR2, 8, 0),
+	/* gModify.Cmmt Implement when suspend/startup */
+	/*SND_SOC_DAPM_DAC("Right DAC", "Right Playback", WM8988_PWR2, 7, 0),*/
+	/*SND_SOC_DAPM_DAC("Left DAC", "Left Playback", WM8988_PWR2, 8, 0),*/
 
 	SND_SOC_DAPM_MIXER("Left Mixer", SND_SOC_NOPM, 0, 0,
 		&wm8988_left_mixer_controls[0],
@@ -479,7 +495,7 @@ static struct snd_pcm_hw_constraint_list constraints_112896 = {
 };
 
 static unsigned int rates_12[] = {
-	8000, 11025, 12000, 16000, 22050, 2400, 32000, 41100, 48000,
+	8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000,
 	48000, 88235, 96000,
 };
 
@@ -497,6 +513,8 @@ static int wm8988_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 	struct snd_soc_codec *codec = codec_dai->codec;
 	struct wm8988_priv *wm8988 = snd_soc_codec_get_drvdata(codec);
 
+    DBG("Enter::%s----%d\n",__FUNCTION__,__LINE__);
+		
 	switch (freq) {
 	case 11289600:
 	case 18432000:
@@ -577,6 +595,8 @@ static int wm8988_set_dai_fmt(struct snd_soc_dai *codec_dai,
 		return -EINVAL;
 	}
 
+	DBG("Enter::%s----%d  iface=%x\n",__FUNCTION__,__LINE__,iface);
+
 	snd_soc_write(codec, WM8988_IFACE, iface);
 	return 0;
 }
@@ -586,6 +606,17 @@ static int wm8988_pcm_startup(struct snd_pcm_substream *substream,
 {
 	struct snd_soc_codec *codec = dai->codec;
 	struct wm8988_priv *wm8988 = snd_soc_codec_get_drvdata(codec);
+
+	if (!wm8988->is_startup) {
+		wm8988->is_startup = 1;
+		snd_soc_write(codec, WM8988_PWR1, 0xfc);
+		gpio_direction_output(RK29_PIN6_PB5, GPIO_LOW);
+		mdelay(100);		// Discharge C310
+		snd_soc_write(codec, WM8988_PWR2, 0x1e0);
+		gpio_direction_output(RK29_PIN6_PB5, GPIO_HIGH);
+	}
+
+	DBG("Enter::%s----%d  wm8988->sysclk=%d\n",__FUNCTION__,__LINE__,wm8988->sysclk); 
 
 	/* The set of sample rates that can be supported depends on the
 	 * MCLK supplied to the CODEC - enforce this.
@@ -608,8 +639,7 @@ static int wm8988_pcm_hw_params(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_device *socdev = rtd->socdev;
-	struct snd_soc_codec *codec = socdev->card->codec;
+	struct snd_soc_codec *codec = rtd->codec;
 	struct wm8988_priv *wm8988 = snd_soc_codec_get_drvdata(codec);
 	u16 iface = snd_soc_read(codec, WM8988_IFACE) & 0x1f3;
 	u16 srate = snd_soc_read(codec, WM8988_SRATE) & 0x180;
@@ -642,6 +672,8 @@ static int wm8988_pcm_hw_params(struct snd_pcm_substream *substream,
 		break;
 	}
 
+	DBG("Enter::%s----%d  iface=%x srate =%x rate=%d\n",__FUNCTION__,__LINE__,iface,srate,params_rate(params));
+
 	/* set iface & srate */
 	snd_soc_write(codec, WM8988_IFACE, iface);
 	if (coeff >= 0)
@@ -656,6 +688,8 @@ static int wm8988_mute(struct snd_soc_dai *dai, int mute)
 	struct snd_soc_codec *codec = dai->codec;
 	u16 mute_reg = snd_soc_read(codec, WM8988_ADCDAC) & 0xfff7;
 
+	DBG("Enter::%s----%d--mute=%d\n",__FUNCTION__,__LINE__,mute);
+
 	if (mute)
 		snd_soc_write(codec, WM8988_ADCDAC, mute_reg | 0x8);
 	else
@@ -666,19 +700,28 @@ static int wm8988_mute(struct snd_soc_dai *dai, int mute)
 static int wm8988_set_bias_level(struct snd_soc_codec *codec,
 				 enum snd_soc_bias_level level)
 {
+	struct wm8988_priv *wm8988 = snd_soc_codec_get_drvdata(codec);
 	u16 pwr_reg = snd_soc_read(codec, WM8988_PWR1) & ~0x1c1;
+
+	DBG("Enter::%s----%d level =%d\n",__FUNCTION__,__LINE__,level);
 
 	switch (level) {
 	case SND_SOC_BIAS_ON:
+		wm8988->is_biason = 1;
 		break;
 
 	case SND_SOC_BIAS_PREPARE:
+		if (wm8988->is_startup && wm8988->is_biason) {
+			snd_soc_write(codec, WM8988_PWR2, 0x0);
+			wm8988->is_startup = 0;
+			wm8988->is_biason = 0;
+		}
 		/* VREF, VMID=2x50k, digital enabled */
 		snd_soc_write(codec, WM8988_PWR1, pwr_reg | 0x00c0);
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (codec->bias_level == SND_SOC_BIAS_OFF) {
+		if (codec->dapm.bias_level == SND_SOC_BIAS_OFF) {
 			/* VREF, VMID=2x5k */
 			snd_soc_write(codec, WM8988_PWR1, pwr_reg | 0x1c1);
 
@@ -694,7 +737,7 @@ static int wm8988_set_bias_level(struct snd_soc_codec *codec,
 		snd_soc_write(codec, WM8988_PWR1, 0x0000);
 		break;
 	}
-	codec->bias_level = level;
+	codec->dapm.bias_level = level;
 	return 0;
 }
 
@@ -711,8 +754,8 @@ static struct snd_soc_dai_ops wm8988_ops = {
 	.digital_mute = wm8988_mute,
 };
 
-struct snd_soc_dai wm8988_dai = {
-	.name = "WM8988",
+static struct snd_soc_dai_driver wm8988_dai = {
+	.name = "WM8988 HiFi",
 	.playback = {
 		.stream_name = "Playback",
 		.channels_min = 1,
@@ -730,24 +773,22 @@ struct snd_soc_dai wm8988_dai = {
 	.ops = &wm8988_ops,
 	.symmetric_rates = 1,
 };
-EXPORT_SYMBOL_GPL(wm8988_dai);
 
-static int wm8988_suspend(struct platform_device *pdev, pm_message_t state)
+static int wm8988_suspend(struct snd_soc_codec *codec, pm_message_t state)
 {
-	struct snd_soc_device *socdev = platform_get_drvdata(pdev);
-	struct snd_soc_codec *codec = socdev->card->codec;
+	DBG("Enter::%s----%d\n",__FUNCTION__,__LINE__);
 
 	wm8988_set_bias_level(codec, SND_SOC_BIAS_OFF);
 	return 0;
 }
 
-static int wm8988_resume(struct platform_device *pdev)
+static int wm8988_resume(struct snd_soc_codec *codec)
 {
-	struct snd_soc_device *socdev = platform_get_drvdata(pdev);
-	struct snd_soc_codec *codec = socdev->card->codec;
 	int i;
 	u8 data[2];
 	u16 *cache = codec->reg_cache;
+
+	DBG("Enter::%s----%d\n",__FUNCTION__,__LINE__);
 
 	/* Sync reg_cache with the hardware */
 	for (i = 0; i < WM8988_NUM_REG; i++) {
@@ -757,6 +798,9 @@ static int wm8988_resume(struct platform_device *pdev)
 		data[1] = cache[i] & 0x00ff;
 		codec->hw_write(codec->control_data, data, 2);
 	}
+	
+	//snd_soc_write(codec, WM8988_PWR1, 0xfc);
+	//snd_soc_write(codec, WM8988_PWR2, 0x1e0);
 
 	wm8988_set_bias_level(codec, SND_SOC_BIAS_STANDBY);
 
@@ -765,98 +809,52 @@ static int wm8988_resume(struct platform_device *pdev)
 
 static struct snd_soc_codec *wm8988_codec;
 
-static int wm8988_probe(struct platform_device *pdev)
+static int entry_read(char *page, char **start, off_t off,
+		int count, int *eof, void *data)
 {
-	struct snd_soc_device *socdev = platform_get_drvdata(pdev);
-	struct snd_soc_codec *codec;
-	int ret = 0;
+	int len;
 
-	if (wm8988_codec == NULL) {
-		dev_err(&pdev->dev, "Codec device not registered\n");
+	snd_soc_write(wm8988_codec, WM8988_PWR1, 0x0000);
+	snd_soc_write(wm8988_codec, WM8988_PWR2, 0x0000);
+
+	len = sprintf(page, "wm8988 suspend...\n");
+
+	return len ;
+}
+
+static int wm8988_probe(struct snd_soc_codec *codec)
+{
+	struct wm8988_priv *wm8988 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_dapm_context *dapm = &codec->dapm;
+	int ret = 0;
+	u16 reg;
+
+	if (codec == NULL) {
+		dev_err(codec->dev, "Codec device not registered\n");
 		return -ENODEV;
 	}
 
-	socdev->card->codec = wm8988_codec;
-	codec = wm8988_codec;
+	wm8988_codec = codec;
 
-	/* register pcms */
-	ret = snd_soc_new_pcms(socdev, SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1);
-	if (ret < 0) {
-		dev_err(codec->dev, "failed to create pcms: %d\n", ret);
-		goto pcm_err;
-	}
-
-	snd_soc_add_controls(codec, wm8988_snd_controls,
-				ARRAY_SIZE(wm8988_snd_controls));
-	snd_soc_dapm_new_controls(codec, wm8988_dapm_widgets,
-				  ARRAY_SIZE(wm8988_dapm_widgets));
-	snd_soc_dapm_add_routes(codec, audio_map, ARRAY_SIZE(audio_map));
-
-	return ret;
-
-pcm_err:
-	return ret;
-}
-
-static int wm8988_remove(struct platform_device *pdev)
-{
-	struct snd_soc_device *socdev = platform_get_drvdata(pdev);
-
-	snd_soc_free_pcms(socdev);
-	snd_soc_dapm_free(socdev);
-
-	return 0;
-}
-
-struct snd_soc_codec_device soc_codec_dev_wm8988 = {
-	.probe = 	wm8988_probe,
-	.remove = 	wm8988_remove,
-	.suspend = 	wm8988_suspend,
-	.resume =	wm8988_resume,
-};
-EXPORT_SYMBOL_GPL(soc_codec_dev_wm8988);
-
-static int wm8988_register(struct wm8988_priv *wm8988,
-			   enum snd_soc_control_type control)
-{
-	struct snd_soc_codec *codec = &wm8988->codec;
-	int ret;
-	u16 reg;
-
-	if (wm8988_codec) {
-		dev_err(codec->dev, "Another WM8988 is registered\n");
-		ret = -EINVAL;
-		goto err;
-	}
-
-	mutex_init(&codec->mutex);
-	INIT_LIST_HEAD(&codec->dapm_widgets);
-	INIT_LIST_HEAD(&codec->dapm_paths);
-
-	snd_soc_codec_set_drvdata(codec, wm8988);
-	codec->name = "WM8988";
-	codec->owner = THIS_MODULE;
-	codec->dai = &wm8988_dai;
-	codec->num_dai = 1;
-	codec->reg_cache_size = ARRAY_SIZE(wm8988->reg_cache);
-	codec->reg_cache = &wm8988->reg_cache;
-	codec->bias_level = SND_SOC_BIAS_OFF;
-	codec->set_bias_level = wm8988_set_bias_level;
-
-	memcpy(codec->reg_cache, wm8988_reg,
-	       sizeof(wm8988_reg));
-
-	ret = snd_soc_codec_set_cache_io(codec, 7, 9, control);
+	ret = snd_soc_codec_set_cache_io(codec, 7, 9, wm8988->control_type);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to set cache I/O: %d\n", ret);
-		goto err;
+		return ret;
 	}
 
 	ret = wm8988_reset(codec);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to issue reset\n");
-		goto err;
+		return ret;
 	}
+
+#if 0
+		/*disable speaker */
+		gpio_request(RK2818_PIN_PF7, "WM8988");	
+		rk2818_mux_api_set(GPIOE_SPI1_FLASH_SEL_NAME, IOMUXA_GPIO1_A3B7);
+		gpio_direction_output(RK2818_PIN_PF7,GPIO_HIGH);
+		
+#endif
 
 	/* set the update bits (we always update left then right) */
 	reg = snd_soc_read(codec, WM8988_RADC);
@@ -868,70 +866,132 @@ static int wm8988_register(struct wm8988_priv *wm8988,
 	reg = snd_soc_read(codec, WM8988_ROUT2V);
 	snd_soc_write(codec, WM8988_ROUT2V, reg | 0x0100);
 	reg = snd_soc_read(codec, WM8988_RINVOL);
-	snd_soc_write(codec, WM8988_RINVOL, reg | 0x0100);
+	snd_soc_write(codec, WM8988_RINVOL, reg | 0x0100); 
+	
+	snd_soc_write(codec, WM8988_LOUTM1, 0x120); 
+	snd_soc_write(codec, WM8988_ROUTM2, 0x120);  
+	snd_soc_write(codec, WM8988_LOUTM2, 0x0070);
+	snd_soc_write(codec, WM8988_ROUTM1, 0x0070);
+//tcl miaozh modify	
+//	snd_soc_write(codec, WM8988_LOUT1V, 0x017f); 
+//	snd_soc_write(codec, WM8988_ROUT1V, 0x017f);
+	snd_soc_write(codec, WM8988_LOUT1V, 0x017a); 
+	snd_soc_write(codec, WM8988_ROUT1V, 0x017a);
+	
+	snd_soc_write(codec, WM8988_LDAC, 0xfa/*0xff*/);  // Change max by zhansb@110415
+	snd_soc_write(codec, WM8988_RDAC, 0x1fa/*0x1ff*/);//vol set 
 
-	wm8988_set_bias_level(&wm8988->codec, SND_SOC_BIAS_STANDBY);
+	//TCL lgw add 20110412
+	snd_soc_write(codec, WM8988_LINVOL,  0x0117);
+	snd_soc_write(codec, WM8988_RINVOL,  0x0117);
 
-	wm8988_dai.dev = codec->dev;
+	snd_soc_write(codec, WM8988_ADCTL2, 0x0184);
 
-	wm8988_codec = codec;
+	snd_soc_write(codec, WM8988_LADC, 0x01ec);
+	snd_soc_write(codec, WM8988_RADC, 0x01ec);
+	
+	snd_soc_write(codec, WM8988_ADCIN,  0x0140);
+	snd_soc_write(codec, WM8988_LADCIN, 0x00f0);//0x00e0
+	snd_soc_write(codec, WM8988_RADCIN, 0x0);//0x00e0
+	//lgw end
+	
+	snd_soc_write(codec, WM8988_SRATE,0x100);  ///SET MCLK/8
+	//snd_soc_write(codec, WM8988_PWR1, 0x1cc);  ///(0x80|0x40|0x20|0x08|0x04|0x10|0x02));
+	//TCL lgw modify 20110412
+	//snd_soc_write(codec, WM8988_PWR1, 0xfc);
+ 	//snd_soc_write(codec, WM8988_PWR2, 0x1e0);  //power r l out1
 
-	ret = snd_soc_register_codec(codec);
-	if (ret != 0) {
-		dev_err(codec->dev, "Failed to register codec: %d\n", ret);
-		goto err;
-	}
+	wm8988_set_bias_level(codec, SND_SOC_BIAS_STANDBY);
 
-	ret = snd_soc_register_dai(&wm8988_dai);
-	if (ret != 0) {
-		dev_err(codec->dev, "Failed to register DAI: %d\n", ret);
-		snd_soc_unregister_codec(codec);
-		goto err_codec;
-	}
+	snd_soc_add_controls(codec, wm8988_snd_controls,
+				ARRAY_SIZE(wm8988_snd_controls));
+	snd_soc_dapm_new_controls(dapm, wm8988_dapm_widgets,
+				  ARRAY_SIZE(wm8988_dapm_widgets));
+	snd_soc_dapm_add_routes(dapm, audio_map, ARRAY_SIZE(audio_map));
+	create_proc_read_entry("wm8988_suspend", 0644, NULL, entry_read, NULL);
 
 	return 0;
-
-err_codec:
-	snd_soc_unregister_codec(codec);
-err:
-	kfree(wm8988);
-	return ret;
 }
 
-static void wm8988_unregister(struct wm8988_priv *wm8988)
+static int wm8988_remove(struct snd_soc_codec *codec)
 {
-	wm8988_set_bias_level(&wm8988->codec, SND_SOC_BIAS_OFF);
-	snd_soc_unregister_dai(&wm8988_dai);
-	snd_soc_unregister_codec(&wm8988->codec);
-	kfree(wm8988);
-	wm8988_codec = NULL;
+	wm8988_set_bias_level(codec, SND_SOC_BIAS_OFF);
+	return 0;
 }
 
-#if defined(CONFIG_I2C) || defined(CONFIG_I2C_MODULE)
-static int wm8988_i2c_probe(struct i2c_client *i2c,
-			    const struct i2c_device_id *id)
+static struct snd_soc_codec_driver soc_codec_dev_wm8988 = {
+	.probe =	wm8988_probe,
+	.remove =	wm8988_remove,
+	.suspend =	wm8988_suspend,
+	.resume =	wm8988_resume,
+	.set_bias_level = wm8988_set_bias_level,
+	.reg_cache_size = ARRAY_SIZE(wm8988_reg),
+	.reg_word_size = sizeof(u16),
+	.reg_cache_default = wm8988_reg,
+};
+
+#if defined(CONFIG_SPI_MASTER)
+static int __devinit wm8988_spi_probe(struct spi_device *spi)
 {
 	struct wm8988_priv *wm8988;
-	struct snd_soc_codec *codec;
+	int ret;
 
 	wm8988 = kzalloc(sizeof(struct wm8988_priv), GFP_KERNEL);
 	if (wm8988 == NULL)
 		return -ENOMEM;
 
-	codec = &wm8988->codec;
+	wm8988->control_type = SND_SOC_SPI;
+	spi_set_drvdata(spi, wm8988);
 
-	i2c_set_clientdata(i2c, wm8988);
-	codec->control_data = i2c;
-
-	codec->dev = &i2c->dev;
-
-	return wm8988_register(wm8988, SND_SOC_I2C);
+	ret = snd_soc_register_codec(&spi->dev,
+			&soc_codec_dev_wm8988, &wm8988_dai, 1);
+	if (ret < 0)
+		kfree(wm8988);
+	return ret;
 }
 
-static int wm8988_i2c_remove(struct i2c_client *client)
+static int __devexit wm8988_spi_remove(struct spi_device *spi)
 {
-	struct wm8988_priv *wm8988 = i2c_get_clientdata(client);
-	wm8988_unregister(wm8988);
+	snd_soc_unregister_codec(&spi->dev);
+	kfree(spi_get_drvdata(spi));
+	return 0;
+}
+
+static struct spi_driver wm8988_spi_driver = {
+	.driver = {
+		.name	= "WM8988",
+		.owner	= THIS_MODULE,
+	},
+	.probe		= wm8988_spi_probe,
+	.remove		= __devexit_p(wm8988_spi_remove),
+};
+#endif /* CONFIG_SPI_MASTER */
+
+#if defined(CONFIG_I2C) || defined(CONFIG_I2C_MODULE)
+static __devinit int wm8988_i2c_probe(struct i2c_client *i2c,
+				      const struct i2c_device_id *id)
+{
+	struct wm8988_priv *wm8988;
+	int ret;
+
+	wm8988 = kzalloc(sizeof(struct wm8988_priv), GFP_KERNEL);
+	if (wm8988 == NULL)
+		return -ENOMEM;
+
+	i2c_set_clientdata(i2c, wm8988);
+	wm8988->control_type = SND_SOC_I2C;
+
+	ret =  snd_soc_register_codec(&i2c->dev,
+			&soc_codec_dev_wm8988, &wm8988_dai, 1);
+	if (ret < 0)
+		kfree(wm8988);
+	return ret;
+}
+
+static __devexit int wm8988_i2c_remove(struct i2c_client *client)
+{
+	snd_soc_unregister_codec(&client->dev);
+	kfree(i2c_get_clientdata(client));
 	return 0;
 }
 
@@ -946,64 +1006,28 @@ static struct i2c_driver wm8988_i2c_driver = {
 		.name = "WM8988",
 		.owner = THIS_MODULE,
 	},
-	.probe = wm8988_i2c_probe,
-	.remove = wm8988_i2c_remove,
+	.probe =    wm8988_i2c_probe,
+	.remove =   __devexit_p(wm8988_i2c_remove),
 	.id_table = wm8988_i2c_id,
-};
-#endif
-
-#if defined(CONFIG_SPI_MASTER)
-static int __devinit wm8988_spi_probe(struct spi_device *spi)
-{
-	struct wm8988_priv *wm8988;
-	struct snd_soc_codec *codec;
-
-	wm8988 = kzalloc(sizeof(struct wm8988_priv), GFP_KERNEL);
-	if (wm8988 == NULL)
-		return -ENOMEM;
-
-	codec = &wm8988->codec;
-	codec->control_data = spi;
-	codec->dev = &spi->dev;
-
-	dev_set_drvdata(&spi->dev, wm8988);
-
-	return wm8988_register(wm8988, SND_SOC_SPI);
-}
-
-static int __devexit wm8988_spi_remove(struct spi_device *spi)
-{
-	struct wm8988_priv *wm8988 = dev_get_drvdata(&spi->dev);
-
-	wm8988_unregister(wm8988);
-
-	return 0;
-}
-
-static struct spi_driver wm8988_spi_driver = {
-	.driver = {
-		.name	= "wm8988",
-		.bus	= &spi_bus_type,
-		.owner	= THIS_MODULE,
-	},
-	.probe		= wm8988_spi_probe,
-	.remove		= __devexit_p(wm8988_spi_remove),
 };
 #endif
 
 static int __init wm8988_modinit(void)
 {
-	int ret;
-
+	int ret = 0;
 #if defined(CONFIG_I2C) || defined(CONFIG_I2C_MODULE)
 	ret = i2c_add_driver(&wm8988_i2c_driver);
-	if (ret != 0)
-		pr_err("WM8988: Unable to register I2C driver: %d\n", ret);
+	if (ret != 0) {
+		printk(KERN_ERR "Failed to register WM8988 I2C driver: %d\n",
+		       ret);
+	}
 #endif
 #if defined(CONFIG_SPI_MASTER)
 	ret = spi_register_driver(&wm8988_spi_driver);
-	if (ret != 0)
-		pr_err("WM8988: Unable to register SPI driver: %d\n", ret);
+	if (ret != 0) {
+		printk(KERN_ERR "Failed to register WM8988 SPI driver: %d\n",
+		       ret);
+	}
 #endif
 	return ret;
 }

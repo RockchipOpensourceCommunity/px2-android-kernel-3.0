@@ -4,6 +4,7 @@
 #include <linux/cpu.h>
 #include <linux/range.h>
 
+#include <asm/amd_nb.h>
 #include <asm/pci_x86.h>
 
 #include <asm/pci-direct.h>
@@ -28,34 +29,6 @@ static struct pci_hostbridge_probe pci_probes[] __initdata = {
 	{ 0xff, 0, PCI_VENDOR_ID_AMD, 0x1200 },
 	{ 0, 0x18, PCI_VENDOR_ID_AMD, 0x1300 },
 };
-
-static u64 __initdata fam10h_mmconf_start;
-static u64 __initdata fam10h_mmconf_end;
-static void __init get_pci_mmcfg_amd_fam10h_range(void)
-{
-	u32 address;
-	u64 base, msr;
-	unsigned segn_busn_bits;
-
-	/* assume all cpus from fam10h have mmconf */
-        if (boot_cpu_data.x86 < 0x10)
-		return;
-
-	address = MSR_FAM10H_MMIO_CONF_BASE;
-	rdmsrl(address, msr);
-
-	/* mmconfig is not enable */
-	if (!(msr & FAM10H_MMIO_CONF_ENABLE))
-		return;
-
-	base = msr & (FAM10H_MMIO_CONF_BASE_MASK<<FAM10H_MMIO_CONF_BASE_SHIFT);
-
-	segn_busn_bits = (msr >> FAM10H_MMIO_CONF_BUSRANGE_SHIFT) &
-			 FAM10H_MMIO_CONF_BUSRANGE_MASK;
-
-	fam10h_mmconf_start = base;
-	fam10h_mmconf_end = base + (1ULL<<(segn_busn_bits + 20)) - 1;
-}
 
 #define RANGE_NUM 16
 
@@ -84,6 +57,9 @@ static int __init early_fill_mp_bus_info(void)
 	u64 val;
 	u32 address;
 	bool found;
+	struct resource fam10h_mmconf_res, *fam10h_mmconf;
+	u64 fam10h_mmconf_start;
+	u64 fam10h_mmconf_end;
 
 	if (!early_pci_allowed())
 		return -1;
@@ -210,12 +186,17 @@ static int __init early_fill_mp_bus_info(void)
 		subtract_range(range, RANGE_NUM, 0, end);
 
 	/* get mmconfig */
-	get_pci_mmcfg_amd_fam10h_range();
+	fam10h_mmconf = amd_get_mmconfig_range(&fam10h_mmconf_res);
 	/* need to take out mmconf range */
-	if (fam10h_mmconf_end) {
-		printk(KERN_DEBUG "Fam 10h mmconf [%llx, %llx]\n", fam10h_mmconf_start, fam10h_mmconf_end);
+	if (fam10h_mmconf) {
+		printk(KERN_DEBUG "Fam 10h mmconf %pR\n", fam10h_mmconf);
+		fam10h_mmconf_start = fam10h_mmconf->start;
+		fam10h_mmconf_end = fam10h_mmconf->end;
 		subtract_range(range, RANGE_NUM, fam10h_mmconf_start,
 				 fam10h_mmconf_end + 1);
+	} else {
+		fam10h_mmconf_start = 0;
+		fam10h_mmconf_end = 0;
 	}
 
 	/* mmio resource */
@@ -349,7 +330,7 @@ static int __init early_fill_mp_bus_info(void)
 
 #define ENABLE_CF8_EXT_CFG      (1ULL << 46)
 
-static void enable_pci_io_ecs(void *unused)
+static void __cpuinit enable_pci_io_ecs(void *unused)
 {
 	u64 reg;
 	rdmsrl(MSR_AMD64_NB_CFG, reg);
@@ -378,6 +359,34 @@ static struct notifier_block __cpuinitdata amd_cpu_notifier = {
 	.notifier_call	= amd_cpu_notify,
 };
 
+static void __init pci_enable_pci_io_ecs(void)
+{
+#ifdef CONFIG_AMD_NB
+	unsigned int i, n;
+
+	for (n = i = 0; !n && amd_nb_bus_dev_ranges[i].dev_limit; ++i) {
+		u8 bus = amd_nb_bus_dev_ranges[i].bus;
+		u8 slot = amd_nb_bus_dev_ranges[i].dev_base;
+		u8 limit = amd_nb_bus_dev_ranges[i].dev_limit;
+
+		for (; slot < limit; ++slot) {
+			u32 val = read_pci_config(bus, slot, 3, 0);
+
+			if (!early_is_amd_nb(val))
+				continue;
+
+			val = read_pci_config(bus, slot, 3, 0x8c);
+			if (!(val & (ENABLE_CF8_EXT_CFG >> 32))) {
+				val |= ENABLE_CF8_EXT_CFG >> 32;
+				write_pci_config(bus, slot, 3, 0x8c, val);
+			}
+			++n;
+		}
+	}
+	pr_info("Extended Config Space enabled on %u nodes\n", n);
+#endif
+}
+
 static int __init pci_io_ecs_init(void)
 {
 	int cpu;
@@ -385,6 +394,10 @@ static int __init pci_io_ecs_init(void)
 	/* assume all cpus from fam10h have IO ECS */
         if (boot_cpu_data.x86 < 0x10)
 		return 0;
+
+	/* Try the PCI method first. */
+	if (early_pci_allowed())
+		pci_enable_pci_io_ecs();
 
 	register_cpu_notifier(&amd_cpu_notifier);
 	for_each_online_cpu(cpu)

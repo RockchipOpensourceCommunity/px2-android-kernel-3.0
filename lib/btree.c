@@ -11,7 +11,7 @@
  * see http://programming.kicks-ass.net/kernel-patches/vma_lookup/btree.patch
  *
  * A relatively simple B+Tree implementation.  I have written it as a learning
- * excercise to understand how B+Trees work.  Turned out to be useful as well.
+ * exercise to understand how B+Trees work.  Turned out to be useful as well.
  *
  * B+Trees can be used similar to Linux radix trees (which don't have anything
  * in common with textbook radix trees, beware).  Prerequisite for them working
@@ -319,8 +319,8 @@ void *btree_get_prev(struct btree_head *head, struct btree_geo *geo,
 
 	if (head->height == 0)
 		return NULL;
-retry:
 	longcpy(key, __key, geo->keylen);
+retry:
 	dec_key(geo, key);
 
 	node = head->node;
@@ -351,7 +351,7 @@ retry:
 	}
 miss:
 	if (retry_key) {
-		__key = retry_key;
+		longcpy(key, retry_key, geo->keylen);
 		retry_key = NULL;
 		goto retry;
 	}
@@ -541,7 +541,7 @@ static void rebalance(struct btree_head *head, struct btree_geo *geo,
 	int i, no_left, no_right;
 
 	if (fill == 0) {
-		/* Because we don't steal entries from a neigbour, this case
+		/* Because we don't steal entries from a neighbour, this case
 		 * can happen.  Parent node contains a single child, this
 		 * node, so merging with a sibling never happens.
 		 */

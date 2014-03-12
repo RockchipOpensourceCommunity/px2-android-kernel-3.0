@@ -334,7 +334,7 @@ static void edge(struct pt_regs *regs, unsigned int insn, unsigned int opf)
 		left = edge32_tab_l[(rs1 >> 2) & 0x1].left;
 		right = edge32_tab_l[(rs2 >> 2) & 0x1].right;
 		break;
-	};
+	}
 
 	if ((rs1 & ~0x7UL) == (rs2 & ~0x7UL))
 		rd_val = right & left;
@@ -360,7 +360,7 @@ static void edge(struct pt_regs *regs, unsigned int insn, unsigned int opf)
 		tstate = regs->tstate & ~(TSTATE_XCC | TSTATE_ICC);
 		regs->tstate = tstate | (ccr << 32UL);
 	}
-	};
+	}
 }
 
 static void array(struct pt_regs *regs, unsigned int insn, unsigned int opf)
@@ -392,7 +392,7 @@ static void array(struct pt_regs *regs, unsigned int insn, unsigned int opf)
 
 	case ARRAY32_OPF:
 		rd_val <<= 2;
-	};
+	}
 
 	store_reg(regs, rd_val, RD(insn));
 }
@@ -577,7 +577,7 @@ static void pformat(struct pt_regs *regs, unsigned int insn, unsigned int opf)
 		*fpd_regaddr(f, RD(insn)) = rd_val;
 		break;
 	}
-	};
+	}
 }
 
 static void pmul(struct pt_regs *regs, unsigned int insn, unsigned int opf)
@@ -693,7 +693,7 @@ static void pmul(struct pt_regs *regs, unsigned int insn, unsigned int opf)
 		*fpd_regaddr(f, RD(insn)) = rd_val;
 		break;
 	}
-	};
+	}
 }
 
 static void pcmp(struct pt_regs *regs, unsigned int insn, unsigned int opf)
@@ -713,17 +713,17 @@ static void pcmp(struct pt_regs *regs, unsigned int insn, unsigned int opf)
 			s16 b = (rs2 >> (i * 16)) & 0xffff;
 
 			if (a > b)
-				rd_val |= 1 << i;
+				rd_val |= 8 >> i;
 		}
 		break;
 
 	case FCMPGT32_OPF:
 		for (i = 0; i < 2; i++) {
-			s32 a = (rs1 >> (i * 32)) & 0xffff;
-			s32 b = (rs2 >> (i * 32)) & 0xffff;
+			s32 a = (rs1 >> (i * 32)) & 0xffffffff;
+			s32 b = (rs2 >> (i * 32)) & 0xffffffff;
 
 			if (a > b)
-				rd_val |= 1 << i;
+				rd_val |= 2 >> i;
 		}
 		break;
 
@@ -733,17 +733,17 @@ static void pcmp(struct pt_regs *regs, unsigned int insn, unsigned int opf)
 			s16 b = (rs2 >> (i * 16)) & 0xffff;
 
 			if (a <= b)
-				rd_val |= 1 << i;
+				rd_val |= 8 >> i;
 		}
 		break;
 
 	case FCMPLE32_OPF:
 		for (i = 0; i < 2; i++) {
-			s32 a = (rs1 >> (i * 32)) & 0xffff;
-			s32 b = (rs2 >> (i * 32)) & 0xffff;
+			s32 a = (rs1 >> (i * 32)) & 0xffffffff;
+			s32 b = (rs2 >> (i * 32)) & 0xffffffff;
 
 			if (a <= b)
-				rd_val |= 1 << i;
+				rd_val |= 2 >> i;
 		}
 		break;
 
@@ -753,17 +753,17 @@ static void pcmp(struct pt_regs *regs, unsigned int insn, unsigned int opf)
 			s16 b = (rs2 >> (i * 16)) & 0xffff;
 
 			if (a != b)
-				rd_val |= 1 << i;
+				rd_val |= 8 >> i;
 		}
 		break;
 
 	case FCMPNE32_OPF:
 		for (i = 0; i < 2; i++) {
-			s32 a = (rs1 >> (i * 32)) & 0xffff;
-			s32 b = (rs2 >> (i * 32)) & 0xffff;
+			s32 a = (rs1 >> (i * 32)) & 0xffffffff;
+			s32 b = (rs2 >> (i * 32)) & 0xffffffff;
 
 			if (a != b)
-				rd_val |= 1 << i;
+				rd_val |= 2 >> i;
 		}
 		break;
 
@@ -773,20 +773,20 @@ static void pcmp(struct pt_regs *regs, unsigned int insn, unsigned int opf)
 			s16 b = (rs2 >> (i * 16)) & 0xffff;
 
 			if (a == b)
-				rd_val |= 1 << i;
+				rd_val |= 8 >> i;
 		}
 		break;
 
 	case FCMPEQ32_OPF:
 		for (i = 0; i < 2; i++) {
-			s32 a = (rs1 >> (i * 32)) & 0xffff;
-			s32 b = (rs2 >> (i * 32)) & 0xffff;
+			s32 a = (rs1 >> (i * 32)) & 0xffffffff;
+			s32 b = (rs2 >> (i * 32)) & 0xffffffff;
 
 			if (a == b)
-				rd_val |= 1 << i;
+				rd_val |= 2 >> i;
 		}
 		break;
-	};
+	}
 
 	maybe_flush_windows(0, 0, RD(insn), 0);
 	store_reg(regs, rd_val, RD(insn));
@@ -885,7 +885,7 @@ int vis_emul(struct pt_regs *regs, unsigned int insn)
 	case BSHUFFLE_OPF:
 		bshuffle(regs, insn);
 		break;
-	};
+	}
 
 	regs->tpc = regs->tnpc;
 	regs->tnpc += 4;

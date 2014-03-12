@@ -1,7 +1,21 @@
 /*
- * (C) 2003 David Woodhouse <dwmw2@infradead.org>
+ * Interface to Linux block layer for MTD 'translation layers'.
  *
- * Interface to Linux 2.5 block layer for MTD 'translation layers'.
+ * Copyright © 2003-2010 David Woodhouse <dwmw2@infradead.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -26,7 +40,8 @@
 static LIST_HEAD(blktrans_majors);
 static DEFINE_MUTEX(blktrans_ref_mutex);
 
-void blktrans_dev_release(struct kref *kref)
+#define MTD_MERGE                       1
+static void blktrans_dev_release(struct kref *kref)
 {
 	struct mtd_blktrans_dev *dev =
 		container_of(kref, struct mtd_blktrans_dev, ref);
@@ -53,40 +68,55 @@ unlock:
 	return dev;
 }
 
-void blktrans_dev_put(struct mtd_blktrans_dev *dev)
+static void blktrans_dev_put(struct mtd_blktrans_dev *dev)
 {
 	mutex_lock(&blktrans_ref_mutex);
 	kref_put(&dev->ref, blktrans_dev_release);
 	mutex_unlock(&blktrans_ref_mutex);
 }
 
-
+#if(MTD_MERGE == 0)
 static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 			       struct mtd_blktrans_dev *dev,
 			       struct request *req)
 {
 	unsigned long block, nsect;
 	char *buf;
-
+#if 0
 	block = blk_rq_pos(req) << 9 >> tr->blkshift;
 	nsect = blk_rq_cur_bytes(req) >> tr->blkshift;
+#else  //modify by zyf for cap>=4GB 20110120
+	block = blk_rq_pos(req);
+	nsect = blk_rq_cur_bytes(req) >> tr->blkshift;
+    if(tr->blkshift != 9)
+    {
+        if(tr->blkshift > 9)
+        {
+    	    block = blk_rq_pos(req) >> (tr->blkshift - 9);
+        }
+        else
+        {
+	        block = blk_rq_pos(req) << (9 - tr->blkshift);
+        }
+    }
+#endif
 
 	buf = req->buffer;
 
-	if (!blk_fs_request(req))
+	if (req->cmd_type != REQ_TYPE_FS)
 		return -EIO;
 
 	if (blk_rq_pos(req) + blk_rq_cur_sectors(req) >
 	    get_capacity(req->rq_disk))
 		return -EIO;
 
-	if (blk_discard_rq(req))
+	if (req->cmd_flags & REQ_DISCARD)
 		return tr->discard(dev, block, nsect);
 
 	switch(rq_data_dir(req)) {
 	case READ:
-		for (; nsect > 0; nsect--, block++, buf += tr->blksize)
-			if (tr->readsect(dev, block, buf))
+		//for (; nsect > 0; nsect--, block++, buf += tr->blksize)
+			if (tr->readsect(dev, block,nsect, buf))
 				return -EIO;
 		rq_flush_dcache_pages(req);
 		return 0;
@@ -95,8 +125,8 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 			return -EIO;
 
 		rq_flush_dcache_pages(req);
-		for (; nsect > 0; nsect--, block++, buf += tr->blksize)
-			if (tr->writesect(dev, block, buf))
+		//for (; nsect > 0; nsect--, block++, buf += tr->blksize)
+			if (tr->writesect(dev, block,nsect, buf))
 				return -EIO;
 		return 0;
 	default:
@@ -105,19 +135,48 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 	}
 }
 
+int mtd_blktrans_cease_background(struct mtd_blktrans_dev *dev)
+{
+	if (kthread_should_stop())
+		return 1;
+
+	return dev->bg_stop;
+}
+EXPORT_SYMBOL_GPL(mtd_blktrans_cease_background);
+
 static int mtd_blktrans_thread(void *arg)
 {
 	struct mtd_blktrans_dev *dev = arg;
+	struct mtd_blktrans_ops *tr = dev->tr;
 	struct request_queue *rq = dev->rq;
 	struct request *req = NULL;
-
+	int background_done = 0;
+	
 	spin_lock_irq(rq->queue_lock);
 
 	while (!kthread_should_stop()) {
 		int res;
 
+		dev->bg_stop = false;
 		if (!req && !(req = blk_fetch_request(rq))) {
+			if (tr->background && !background_done) {
+				spin_unlock_irq(rq->queue_lock);
+				mutex_lock(&dev->lock);
+				tr->background(dev);
+				mutex_unlock(&dev->lock);
+				spin_lock_irq(rq->queue_lock);
+				/*
+				 * Do background processing just once per idle
+				 * period.
+				 */
+				background_done = !dev->bg_stop;
+				continue;
+			}
 			set_current_state(TASK_INTERRUPTIBLE);
+
+			if (kthread_should_stop())
+				set_current_state(TASK_RUNNING);
+
 			spin_unlock_irq(rq->queue_lock);
 			schedule();
 			spin_lock_irq(rq->queue_lock);
@@ -134,6 +193,8 @@ static int mtd_blktrans_thread(void *arg)
 
 		if (!__blk_end_request_cur(req, res))
 			req = NULL;
+
+		background_done = 0;
 	}
 
 	if (req)
@@ -143,7 +204,239 @@ static int mtd_blktrans_thread(void *arg)
 
 	return 0;
 }
+#else
 
+#define MTD_RW_SECTORS  (2048)     // 2048 (BLK_SAFE_MAX_SECTORS+1)
+static char * mtd_rw_buffer;       //[MTD_RW_SECTORS*512]   __attribute__((aligned(4096)));
+struct mutex  mtd_rw_buffer_lock;
+static int req_check_buffer_align(struct request *req,char **pbuf)
+{
+    int    nr_vec = 0;
+    struct bio_vec *bv;
+    struct req_iterator iter;
+    char *buffer;
+    void *firstbuf = 0;
+    char *nextbuffer = 0;
+	unsigned long block, nsect;
+	block = blk_rq_pos(req);
+	nsect = blk_rq_cur_bytes(req) >> 9;
+	rq_for_each_segment(bv, req, iter)
+	{
+	    buffer = page_address(bv->bv_page) + bv->bv_offset;
+	    if( firstbuf == 0 )
+	    {
+            firstbuf = buffer;
+	    }
+        nr_vec++;
+        if(nextbuffer!=0)
+        {
+            if(nextbuffer!=buffer)
+            {
+                return 0;
+            }    
+        }
+        nextbuffer = buffer+bv->bv_len;
+	}
+	*pbuf = firstbuf;
+	return 1;
+}
+
+
+int mtd_blktrans_cease_background(struct mtd_blktrans_dev *dev)
+{
+	if (kthread_should_stop())
+		return 1;
+
+	return dev->bg_stop;
+}
+EXPORT_SYMBOL_GPL(mtd_blktrans_cease_background);
+
+static int mtd_blktrans_thread(void *arg)
+{
+	struct mtd_blktrans_dev *dev = arg;
+	struct mtd_blktrans_ops *tr = dev->tr;
+	struct request_queue *rq = dev->rq;
+	struct request *req = NULL;
+	int background_done = 0;
+	
+	unsigned long block, data_len;
+	char *buf = NULL;
+	struct req_iterator rq_iter;
+	struct bio_vec *bvec;
+	int cmd_flag;
+	
+    set_user_nice(current,-20);
+	spin_lock_irq(rq->queue_lock);
+
+	while (!kthread_should_stop()) {
+		int res;
+
+		dev->bg_stop = false;
+		if (!req && !(req = blk_fetch_request(rq))) {
+			if (tr->background && !background_done) {
+				spin_unlock_irq(rq->queue_lock);
+				mutex_lock(&dev->lock);
+				tr->background(dev);
+				mutex_unlock(&dev->lock);
+				spin_lock_irq(rq->queue_lock);
+				/*
+				 * Do background processing just once per idle
+				 * period.
+				 */
+				background_done = !dev->bg_stop;
+				continue;
+			}
+			set_current_state(TASK_INTERRUPTIBLE);
+
+			if (kthread_should_stop())
+				set_current_state(TASK_RUNNING);
+
+			spin_unlock_irq(rq->queue_lock);
+			schedule();
+			spin_lock_irq(rq->queue_lock);
+			continue;
+		}
+    	if ((req->cmd_type != REQ_TYPE_FS) || (blk_rq_pos(req) + blk_rq_sectors(req) > get_capacity(req->rq_disk)))
+    	{
+            __blk_end_request_all(req, -EIO);
+	        req = NULL;
+		    background_done = 0;
+	        continue;
+    	}
+		spin_unlock_irq(rq->queue_lock);
+        mutex_lock(&dev->lock);
+        
+	    block = blk_rq_pos(req);
+	    data_len = 0;
+		buf = 0;
+		res = 0;
+	    cmd_flag = rq_data_dir(req);
+
+        if (req->cmd_flags & REQ_DISCARD) //zyf add discard
+        {
+            if(tr->discard)
+            {
+                if (tr->discard(dev, block , req->__data_len >> 9))
+                    res = -EIO;
+            }
+            mutex_unlock(&dev->lock);
+            spin_lock_irq(rq->queue_lock);
+            if (!__blk_end_request_cur(req, res))
+                req = NULL;
+            continue;
+        }
+
+	    //i = 0;
+        if(cmd_flag == READ && mtd_rw_buffer)
+        {
+	        unsigned long nsect;
+            buf = mtd_rw_buffer;
+            req_check_buffer_align(req,&buf);
+            nsect = req->__data_len >> 9;
+            if( nsect > MTD_RW_SECTORS ) {
+                printk("%s..%d::nsect=%d,too large , may be error!\n",__FILE__,__LINE__, nsect );
+                nsect = MTD_RW_SECTORS;
+                while(1);
+            }
+			if(buf == mtd_rw_buffer )
+            	mutex_lock(&mtd_rw_buffer_lock);
+    		if (tr->readsect(dev, block,nsect, buf))
+    		    res = -EIO;
+            if( buf == mtd_rw_buffer ) 
+            {
+                char *p = buf;
+        	    rq_for_each_segment(bvec, req, rq_iter) 
+            	{ 
+                    memcpy( page_address(bvec->bv_page) + bvec->bv_offset , p , bvec->bv_len );
+                    flush_dcache_page(bvec->bv_page); //zyf rq_flush_dcache_pages(req);
+                    p += bvec->bv_len;
+            	}
+            	mutex_unlock(&mtd_rw_buffer_lock);
+            }
+            //rq_flush_dcache_pages(req);
+        }
+        else
+        {    
+        	rq_for_each_segment(bvec, req, rq_iter) 
+        	{
+            	//printk("%d buf = %x, lba = %llx , nsec=%x ,offset = %x\n",i,page_address(bvec->bv_page) + bvec->bv_offset,((rq_iter.bio)->bi_sector),(bvec->bv_len),(bvec->bv_offset));
+                //i++;
+                flush_dcache_page(bvec->bv_page); //zyf rq_flush_dcache_pages(req);
+                if((page_address(bvec->bv_page) + bvec->bv_offset) == (buf + data_len))
+                {
+                    data_len += bvec->bv_len;
+                }
+                else
+                {
+                    if(data_len)
+                    {
+            	        //printk("buf = %x, lba = %lx , nsec=%x \n",buf,block,data_len);
+                    	switch(cmd_flag)
+                    	{
+                    	case READ:
+                			if (tr->readsect(dev, block,data_len>>9, buf))
+                				res = -EIO;
+                    		//rq_flush_dcache_pages(req);
+                    		break;
+                    	case WRITE:
+                    		//if (!tr->writesect)
+                    		//	res = -EIO;
+                    		//rq_flush_dcache_pages(req);
+                			if (tr->writesect(dev, block,data_len>>9, buf))
+                				res = -EIO;
+                    		break;
+                    	default:
+                    		//printk(KERN_NOTICE "Unknown request %u\n", rq_data_dir(req));
+                			res = -EIO;
+                    		break;
+                    	}
+                    }
+     				block += data_len>>9;
+    				buf = (page_address(bvec->bv_page) + bvec->bv_offset);
+    				data_len = bvec->bv_len;
+                }
+        	}
+    
+            if(data_len)
+            {
+            	//printk("buf = %x, lba = %lx , nsec=%x \n",buf,block,data_len);
+            	switch(cmd_flag)
+            	{
+            	case READ:
+        			if (tr->readsect(dev, block,data_len>>9, buf))
+        				res = -EIO;
+            		//rq_flush_dcache_pages(req);
+            		break;
+            	case WRITE:
+            		//if (!tr->writesect)
+            		//	res = -EIO;
+            		//rq_flush_dcache_pages(req);
+        			if (tr->writesect(dev, block,data_len>>9, buf))
+        				res = -EIO;
+            		break;
+            	default:
+            		//printk(KERN_NOTICE "Unknown request %u\n", rq_data_dir(req));
+        			res = -EIO;
+            		break;
+            	}
+            }
+        }
+        mutex_unlock(&dev->lock);
+		spin_lock_irq(rq->queue_lock);
+		//printk("__blk_end_request_all %d\n",res);
+		__blk_end_request_all(req, res);
+		req = NULL;
+		background_done = 0;
+	}
+
+	if (req)
+		__blk_end_request_all(req, -EIO);
+
+	spin_unlock_irq(rq->queue_lock);
+
+	return 0;
+}
+#endif
 static void mtd_blktrans_request(struct request_queue *rq)
 {
 	struct mtd_blktrans_dev *dev;
@@ -154,32 +447,53 @@ static void mtd_blktrans_request(struct request_queue *rq)
 	if (!dev)
 		while ((req = blk_fetch_request(rq)) != NULL)
 			__blk_end_request_all(req, -ENODEV);
-	else
+	else {
+		dev->bg_stop = true;
 		wake_up_process(dev->thread);
+	}
 }
 
 static int blktrans_open(struct block_device *bdev, fmode_t mode)
 {
 	struct mtd_blktrans_dev *dev = blktrans_dev_get(bdev->bd_disk);
-	int ret;
+	int ret = 0;
 
 	if (!dev)
-		return -ERESTARTSYS;
+		return -ERESTARTSYS; /* FIXME: busy loop! -arnd*/
 
 	mutex_lock(&dev->lock);
 
-	if (!dev->mtd) {
-		ret = -ENXIO;
+	if (dev->open)
 		goto unlock;
+
+	kref_get(&dev->ref);
+	__module_get(dev->tr->owner);
+
+	if (!dev->mtd)
+		goto unlock;
+
+	if (dev->tr->open) {
+		ret = dev->tr->open(dev);
+		if (ret)
+			goto error_put;
 	}
 
-	ret = !dev->open++ && dev->tr->open ? dev->tr->open(dev) : 0;
+	ret = __get_mtd_device(dev->mtd);
+	if (ret)
+		goto error_release;
 
-	/* Take another reference on the device so it won't go away till
-		last release */
-	if (!ret)
-		kref_get(&dev->ref);
 unlock:
+	dev->open++;
+	mutex_unlock(&dev->lock);
+	blktrans_dev_put(dev);
+	return ret;
+
+error_release:
+	if (dev->tr->release)
+		dev->tr->release(dev);
+error_put:
+	module_put(dev->tr->owner);
+	kref_put(&dev->ref, blktrans_dev_release);
 	mutex_unlock(&dev->lock);
 	blktrans_dev_put(dev);
 	return ret;
@@ -188,20 +502,23 @@ unlock:
 static int blktrans_release(struct gendisk *disk, fmode_t mode)
 {
 	struct mtd_blktrans_dev *dev = blktrans_dev_get(disk);
-	int ret = -ENXIO;
+	int ret = 0;
 
 	if (!dev)
 		return ret;
 
 	mutex_lock(&dev->lock);
 
-	/* Release one reference, we sure its not the last one here*/
-	kref_put(&dev->ref, blktrans_dev_release);
-
-	if (!dev->mtd)
+	if (--dev->open)
 		goto unlock;
 
-	ret = !--dev->open && dev->tr->release ? dev->tr->release(dev) : 0;
+	kref_put(&dev->ref, blktrans_dev_release);
+	module_put(dev->tr->owner);
+
+	if (dev->mtd) {
+		ret = dev->tr->release ? dev->tr->release(dev) : 0;
+		__put_mtd_device(dev->mtd);
+	}
 unlock:
 	mutex_unlock(&dev->lock);
 	blktrans_dev_put(dev);
@@ -245,6 +562,7 @@ static int blktrans_ioctl(struct block_device *bdev, fmode_t mode,
 	switch (cmd) {
 	case BLKFLSBUF:
 		ret = dev->tr->flush ? dev->tr->flush(dev) : 0;
+		break;
 	default:
 		ret = -ENOTTY;
 	}
@@ -258,7 +576,7 @@ static const struct block_device_operations mtd_blktrans_ops = {
 	.owner		= THIS_MODULE,
 	.open		= blktrans_open,
 	.release	= blktrans_release,
-	.locked_ioctl	= blktrans_ioctl,
+	.ioctl		= blktrans_ioctl,
 	.getgeo		= blktrans_getgeo,
 };
 
@@ -345,7 +663,10 @@ int add_mtd_blktrans_dev(struct mtd_blktrans_dev *new)
 		snprintf(gd->disk_name, sizeof(gd->disk_name),
 			 "%s%d", tr->name, new->devnum);
 
-	set_capacity(gd, (new->size * tr->blksize) >> 9);
+	/* 2.5 has capacity in units of 512 bytes while still
+	   having BLOCK_SIZE_BITS set to 10. Just to keep us amused. */
+	//set_capacity(gd, (new->size * tr->blksize) >> 9);
+	set_capacity(gd, (new->size >> 9) * tr->blksize);   //modify by zyf for cap>=4GB 20110120
 
 	/* Create the request queue */
 	spin_lock_init(&new->queue_lock);
@@ -356,15 +677,20 @@ int add_mtd_blktrans_dev(struct mtd_blktrans_dev *new)
 
 	new->rq->queuedata = new;
 	blk_queue_logical_block_size(new->rq, tr->blksize);
+	
+#if (MTD_MERGE == 1)
+    blk_queue_max_hw_sectors(new->rq,MTD_RW_SECTORS);
+	//blk_queue_max_segment_size(new->rq,MTD_RW_SECTORS);
+	blk_queue_max_segments(new->rq, MTD_RW_SECTORS);// /PAGE_CACHE_SIZE
+#endif
 
-	if (tr->discard)
-		queue_flag_set_unlocked(QUEUE_FLAG_DISCARD,
-					new->rq);
+	if (tr->discard) {
+		queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, new->rq);
+		//new->rq->limits.max_discard_sectors = UINT_MAX;
+        blk_queue_max_discard_sectors(new->rq, UINT_MAX >> 9); //use generic helper to set max_discard_sectors
+	}
 
 	gd->queue = new->rq;
-
-	__get_mtd_device(new->mtd);
-	__module_get(tr->owner);
 
 	/* Create processing thread */
 	/* TODO: workqueue ? */
@@ -388,15 +714,12 @@ int add_mtd_blktrans_dev(struct mtd_blktrans_dev *new)
 	}
 	return 0;
 error4:
-	module_put(tr->owner);
-	__put_mtd_device(new->mtd);
 	blk_cleanup_queue(new->rq);
 error3:
 	put_disk(new->disk);
 error2:
 	list_del(&new->list);
 error1:
-	kfree(new);
 	return ret;
 }
 
@@ -409,12 +732,13 @@ int del_mtd_blktrans_dev(struct mtd_blktrans_dev *old)
 		BUG();
 	}
 
-	/* Stop new requests to arrive */
-	del_gendisk(old->disk);
-
 	if (old->disk_attributes)
 		sysfs_remove_group(&disk_to_dev(old->disk)->kobj,
 						old->disk_attributes);
+
+	/* Stop new requests to arrive */
+	del_gendisk(old->disk);
+
 
 	/* Stop the thread */
 	kthread_stop(old->thread);
@@ -425,17 +749,15 @@ int del_mtd_blktrans_dev(struct mtd_blktrans_dev *old)
 	blk_start_queue(old->rq);
 	spin_unlock_irqrestore(&old->queue_lock, flags);
 
-	/* Ask trans driver for release to the mtd device */
+	/* If the device is currently open, tell trans driver to close it,
+		then put mtd device, and don't touch it again */
 	mutex_lock(&old->lock);
-	if (old->open && old->tr->release) {
-		old->tr->release(old);
-		old->open = 0;
+	if (old->open) {
+		if (old->tr->release)
+			old->tr->release(old);
+		__put_mtd_device(old->mtd);
 	}
 
-	__put_mtd_device(old->mtd);
-	module_put(old->tr->owner);
-
-	/* At that point, we don't touch the mtd anymore */
 	old->mtd = NULL;
 
 	mutex_unlock(&old->lock);
@@ -474,7 +796,10 @@ int register_mtd_blktrans(struct mtd_blktrans_ops *tr)
 {
 	struct mtd_info *mtd;
 	int ret;
-
+#if(MTD_MERGE != 0)
+	mutex_init(&mtd_rw_buffer_lock);
+    mtd_rw_buffer = kmalloc(MTD_RW_SECTORS*512, GFP_KERNEL | GFP_DMA);
+#endif
 	/* Register the notifier if/when the first device type is
 	   registered, to prevent the link/init ordering from fucking
 	   us over. */
@@ -485,12 +810,15 @@ int register_mtd_blktrans(struct mtd_blktrans_ops *tr)
 	mutex_lock(&mtd_table_mutex);
 
 	ret = register_blkdev(tr->major, tr->name);
-	if (ret) {
+	if (ret < 0) {
 		printk(KERN_WARNING "Unable to register %s block device on major %d: %d\n",
 		       tr->name, tr->major, ret);
 		mutex_unlock(&mtd_table_mutex);
 		return ret;
 	}
+
+	if (ret)
+		tr->major = ret;
 
 	tr->blkshift = ffs(tr->blksize) - 1;
 
