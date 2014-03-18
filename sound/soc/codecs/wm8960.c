@@ -1027,9 +1027,16 @@ static int wm8960_probe(struct snd_soc_codec *codec)
 	reg = snd_soc_read(codec, WM8960_ROUT2);
 	snd_soc_write(codec, WM8960_ROUT2, reg | 0x100);
 
+
 	//select jd2 jack detect 
-	//reg = snd_soc_read(codec, WM8960_ADDCTL4);
-	//snd_soc_write(codec, WM8960_ADDCTL4, reg | 0x0a0);
+	reg = snd_soc_read(codec, WM8960_ADDCTL2);
+	snd_soc_write(codec, WM8960_ADDCTL2, reg | 0x040);
+
+	reg = snd_soc_read(codec, WM8960_ADDCTL4);
+	snd_soc_write(codec, WM8960_ADDCTL4, reg | 0x00a);
+
+	reg = snd_soc_read(codec, WM8960_ADDCTL1);
+	snd_soc_write(codec, WM8960_ADDCTL1, reg | 0x003);
 
 	//enable micbias vol output for hp detect 
 	reg = snd_soc_read(codec, WM8960_POWER1);
