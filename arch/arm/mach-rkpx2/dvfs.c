@@ -480,10 +480,10 @@ static struct cpufreq_frequency_table dep_cpu2core_table[] = {
 	// {.frequency = 252 * DVFS_KHZ, .index    = 1025 * DVFS_MV},
 	// {.frequency = 504 * DVFS_KHZ, .index    = 1025 * DVFS_MV},
 	{.frequency = 816 * DVFS_KHZ, .index    = 1050 * DVFS_MV},//logic 1.050V
-	// {.frequency = 1008 * DVFS_KHZ,.index    = 1050 * DVFS_MV},
-	// {.frequency = 1200 * DVFS_KHZ,.index    = 1050 * DVFS_MV},
-	// {.frequency = 1272 * DVFS_KHZ,.index    = 1050 * DVFS_MV},//logic 1.050V
-	// {.frequency = 1416 * DVFS_KHZ,.index    = 1100 * DVFS_MV},//logic 1.100V
+	{.frequency = 1008 * DVFS_KHZ,.index    = 1050 * DVFS_MV},
+	{.frequency = 1200 * DVFS_KHZ,.index    = 1050 * DVFS_MV},
+	{.frequency = 1272 * DVFS_KHZ,.index    = 1050 * DVFS_MV},//logic 1.050V
+	{.frequency = 1416 * DVFS_KHZ,.index    = 1100 * DVFS_MV},//logic 1.100V
 	// {.frequency = 1512 * DVFS_KHZ,.index    = 1125 * DVFS_MV},//logic 1.125V
 	// {.frequency = 1608 * DVFS_KHZ,.index    = 1175 * DVFS_MV},//logic 1.175V
 	{.frequency	= CPUFREQ_TABLE_END},
