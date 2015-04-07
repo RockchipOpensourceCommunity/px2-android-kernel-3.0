@@ -29,7 +29,6 @@ typedef enum
 	UMP_REF_DRV_CONSTRAINT_NONE = 0,
 	UMP_REF_DRV_CONSTRAINT_PHYSICALLY_LINEAR = 1,
 	UMP_REF_DRV_CONSTRAINT_USE_CACHE = 4,
-	UMP_REF_DRV_CONSTRAINT_PRE_RESERVE = 8,
 } ump_alloc_constraints;
 
 /** Allocate an UMP handle containing a memory buffer.
@@ -38,8 +37,6 @@ typedef enum
  *        If it is UMP_REF_DRV_CONSTRAINT_NONE it is mapped as noncached.
  *        The flag UMP_REF_DRV_CONSTRAINT_PHYSICALLY_LINEAR is not supported.*/
 UMP_API_EXPORT ump_handle ump_ref_drv_allocate(unsigned long size, ump_alloc_constraints usage);
-
-UMP_API_EXPORT int ump_phy_addr_get(ump_handle memh);
 
 typedef enum
 {

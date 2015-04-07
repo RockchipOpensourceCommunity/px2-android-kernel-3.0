@@ -1,0 +1,4 @@
+config FB_RK_UMP
+        tristate "Enable FB/UMP Integration"
+        depends on FB_ROCKCHIP
+		default y

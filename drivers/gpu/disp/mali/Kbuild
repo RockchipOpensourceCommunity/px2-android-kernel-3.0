@@ -110,7 +110,9 @@ mali-y += \
 	common/mali_pm_domain.o \
 	linux/mali_osk_pm.o \
 	linux/mali_pmu_power_up_down.o \
-	__malidrv_build_info.o
+	__malidrv_build_info.o \
+	platform/rkpx2/mali_platform.o \
+	platform/rkpx2/rkpx2.o
 
 ifneq ($(MALI_PLATFORM_FILES),)
 	mali-y += $(MALI_PLATFORM_FILES:.c=.o)
@@ -124,6 +126,7 @@ ccflags-$(CONFIG_MALI400_INTERNAL_PROFILING) += -I$(src)/timestamp-$(TIMESTAMP)
 
 mali-$(CONFIG_DMA_SHARED_BUFFER) += linux/mali_memory_dma_buf.o
 mali-$(CONFIG_SYNC) += linux/mali_sync.o
+ccflags-$(CONFIG_SYNC) += -Idrivers/staging/android
 
 mali-$(CONFIG_MALI400_UMP) += linux/mali_memory_ump.o
 
@@ -145,7 +148,7 @@ ccflags-y += -DMALI_STATE_TRACKING=1
 ccflags-y += -DMALI_OS_MEMORY_KERNEL_BUFFER_SIZE_IN_MB=$(OS_MEMORY_KERNEL_BUFFER_SIZE_IN_MB)
 ccflags-y += -DUSING_GPU_UTILIZATION=$(USING_GPU_UTILIZATION)
 ccflags-y += -DMALI_ENABLE_CPU_CYCLES=$(MALI_ENABLE_CPU_CYCLES)
-
+ccflags-y += -DMALI_FAKE_PLATFORM_DEVICE
 ifeq ($(MALI_UPPER_HALF_SCHEDULING),1)
 	ccflags-y += -DMALI_UPPER_HALF_SCHEDULING
 endif

@@ -119,4 +119,9 @@ config LOGO_LINUX_BMP_ANDROID
         bool "Bmp logo android"
         depends on  LOGO_LINUX_BMP
         default n
+config LOGO_LINUX_BMP_ROCKCHIP
+        bool "Bmp logo Rockchip"
+        depends on  LOGO_LINUX_BMP
+        default n
+
 endif # LOGO

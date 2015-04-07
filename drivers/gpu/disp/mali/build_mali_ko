@@ -4,14 +4,14 @@ echo "**********mali400MP4 kernel modules***********"
 if [ -z "$1" ];then
     echo "generating ump module"
     cd ../ump
-    USING_RETINA=0 CONFIG=pb-virtex5-m400-4 KDIR=../../../../../kernel/ BUILD=release make -j8
+    USING_RETINA=0 CONFIG=pb-virtex5-m400-4 KDIR=../../../../../px3/ BUILD=release make -j8
     cd -
     echo "generating mali module"
     USING_PROFILING=1 USING_TRACEPOINTS=1 USING_UMP=1 USING_GPU_UTILIZATION=1 TARGET_PLATFORM=rkpx2 BUILD=release make -j8       
 elif [ $1 = "clean" ];then
     echo "Cleaning ump modules"
 	cd ../ump
-	USING_RETINA=0 CONFIG=pb-virtex5-m400-4 KDIR=../../../../../kernel/ BUILD=release make clean -j8
+	USING_RETINA=0 CONFIG=pb-virtex5-m400-4 KDIR=../../../../../px3/ BUILD=release make clean -j8
 	cd -
 	echo "Cleaning mali modules"
    USING_PROFILING=1 USING_TRACEPOINTS=1 USING_UMP=1 USING_GPU_UTILIZATION=1 TARGET_PLATFORM=rkpx2 BUILD=release make clean -j8

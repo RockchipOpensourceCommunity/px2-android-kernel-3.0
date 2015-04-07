@@ -48,15 +48,13 @@ typedef enum
 	_UMP_IOC_SWITCH_HW_USAGE,
 	_UMP_IOC_LOCK,
 	_UMP_IOC_UNLOCK,
-}_ump_uk_functions;
+} _ump_uk_functions;
 
 typedef enum
 {
 	UMP_REF_DRV_UK_CONSTRAINT_NONE = 0,
 	UMP_REF_DRV_UK_CONSTRAINT_PHYSICALLY_LINEAR = 1,
 	UMP_REF_DRV_UK_CONSTRAINT_USE_CACHE = 4,
-	UMP_REF_DRV_UK_CONSTRAINT_PRE_RESERVE = 8,
-	UMP_REF_DRV_UK_CONSTRAINT_MEM_SWITCH = 16,
 } ump_uk_alloc_constraints;
 
 typedef enum

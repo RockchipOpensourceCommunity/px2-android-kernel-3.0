@@ -1,5 +1,5 @@
 # Location of default kernels
-KDIR-rkpx2:=../../../../../kernel
+KDIR-rkpx2:=../../../../../px3
 #KDIR-odroida:=/projects/pr297/linux/odroid-a/current/linux
 #KDIR-odroidpc:=/projects/pr297/linux/odroid-pc/current/linux
 #KDIR-odroidq:=/projects/pr297/linux/odroid-q/current/linux

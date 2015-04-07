@@ -36,3 +36,4 @@ obj-$(CONFIG_DRM_VMWGFX)+= vmwgfx/
 obj-$(CONFIG_DRM_VIA)	+=via/
 obj-$(CONFIG_DRM_NOUVEAU) +=nouveau/
 obj-y			+= i2c/
+obj-$(CONFIG_DRM_MALI) +=mali/

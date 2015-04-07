@@ -368,7 +368,7 @@ int mali_module_init(void)
 	}
 #endif
 
-	MALI_PRINT(("Mali device driver loaded\n"));
+	MALI_PRINT(("CC-Mali device driver loaded\n"));
 
 	return 0; /* Success */
 }
@@ -503,6 +503,8 @@ static int mali_driver_runtime_idle(struct device *dev)
 
 static int mali_open(struct inode *inode, struct file *filp)
 {
+	MALI_PRINT(("open mali device file!"));
+
 	struct mali_session_data * session_data;
 	_mali_osk_errcode_t err;
 
@@ -541,7 +543,8 @@ static int mali_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-int map_errcode( _mali_osk_errcode_t err )
+#if 0
+int map_errcode(_mali_osk_errcode_t err)
 {
 	switch(err) {
 	case _MALI_OSK_ERR_OK :
@@ -564,6 +567,7 @@ int map_errcode( _mali_osk_errcode_t err )
 		return -EFAULT;
 	}
 }
+#endif
 
 #ifdef HAVE_UNLOCKED_IOCTL
 static long mali_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
@@ -579,7 +583,7 @@ static int mali_ioctl(struct inode *inode, struct file *filp, unsigned int cmd, 
 	(void)inode;
 #endif
 
-	MALI_DEBUG_PRINT(7, ("Ioctl received 0x%08X 0x%08lX\n", cmd, arg));
+	MALI_PRINT(("Ioctl received 0x%08X 0x%08lX\n", cmd, arg));
 
 	session_data = (struct mali_session_data *)filp->private_data;
 	if (NULL == session_data) {

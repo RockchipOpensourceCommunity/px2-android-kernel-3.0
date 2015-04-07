@@ -18,12 +18,12 @@
 /* Timing */
 #define H_PW			1
 #define H_BP			1
-#define H_VD			480
+#define H_VD			1440
 #define H_FP			2
 
 #define V_PW			1
 #define V_BP			4
-#define V_VD			800
+#define V_VD			900
 #define V_FP			2
 
 #define LCD_WIDTH       480    //need modify

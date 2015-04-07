@@ -10,7 +10,7 @@
 
 # Set default configuration to use, if Makefile didn't provide one.
 # Change this to use a different config.h
-CONFIG ?= os_memory_64m
+CONFIG ?= pb-virtex5-m400-4
 
 # Validate selected config
 ifneq ($(shell [ -d $(src)/arch-$(CONFIG) ] && [ -f  $(src)/arch-$(CONFIG)/config.h ] && echo "OK"), OK)
@@ -83,12 +83,11 @@ ump-y = common/ump_kernel_common.o \
 	linux/ump_ukk_ref_wrappers.o \
 	linux/ump_osk_atomics.o \
 	linux/ump_osk_low_level_mem.o \
-	linux/ump_osk_misc.o \
-	$(UDD_FILE_PREFIX)linux/mali_osk_atomics.o \
-	$(UDD_FILE_PREFIX)linux/mali_osk_locks.o \
-	$(UDD_FILE_PREFIX)linux/mali_osk_memory.o \
-	$(UDD_FILE_PREFIX)linux/mali_osk_math.o \
-	$(UDD_FILE_PREFIX)linux/mali_osk_misc.o
-
+	linux/ump_osk_misc.o
+	#$(UDD_FILE_PREFIX)linux/mali_osk_atomics.o \
+	#$(UDD_FILE_PREFIX)linux/mali_osk_locks.o \
+	#$(UDD_FILE_PREFIX)linux/mali_osk_memory.o \
+	#$(UDD_FILE_PREFIX)linux/mali_osk_math.o \
+	#$(UDD_FILE_PREFIX)linux/mali_osk_misc.o
 obj-$(CONFIG_UMP) := ump.o
 
