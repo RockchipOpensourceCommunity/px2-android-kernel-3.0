@@ -583,7 +583,7 @@ static int mali_ioctl(struct inode *inode, struct file *filp, unsigned int cmd, 
 	(void)inode;
 #endif
 
-	MALI_PRINT(("Ioctl received 0x%08X 0x%08lX\n", cmd, arg));
+	MALI_DEBUG_PRINT(7, ("Ioctl received 0x%08X 0x%08lX\n", cmd, arg));
 
 	session_data = (struct mali_session_data *)filp->private_data;
 	if (NULL == session_data) {
