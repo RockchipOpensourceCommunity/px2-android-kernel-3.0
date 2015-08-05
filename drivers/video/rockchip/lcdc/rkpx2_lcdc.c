@@ -283,7 +283,7 @@ static int rk30_load_screen(struct rk_lcdc_device_driver *dev_drv, bool initscre
 		lcdc_writel(lcdc_dev, DSP_VTOTAL_VS_END, v_VSYNC(screen->vsync_len) |
 	              v_VERPRD(screen->vsync_len + screen->upper_margin + y_res + lower_margin));
 		lcdc_writel(lcdc_dev, DSP_VACT_ST_END,  v_VAEP(screen->vsync_len + screen->upper_margin+y_res)|
-	              v_VASP(screen->vsync_len + screen->upper_margin));
+	              v_VASP(screen->vsync_len + screen->upper_margin + 1));
 		// let above to take effect
 		lcdc_cfg_done(lcdc_dev);
 	}
