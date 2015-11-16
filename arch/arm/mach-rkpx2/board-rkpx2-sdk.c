@@ -171,7 +171,7 @@ static int rk_headset_io_init(int gpio)
 };
 
 struct rk_headset_pdata rk_headset_info = {
-       .Headset_gpio   = RK30_PIN6_PA0,
+       .Headset_gpio   = RK30_PIN4_PB7,
        .headset_in_type = HEADSET_IN_HIGH,
        .Hook_gpio = RK30_PIN6_PA5,
        .Hook_down_type = HOOK_DOWN_HIGH,
